@@ -47,7 +47,7 @@ automatically from GitHub.
 Example usage:
 
   # update dependencies in the current directory
-  GlimmerWorksBuilder updeps
+  GlimmerWorksCli updeps
 
 Notes:
 
@@ -69,7 +69,7 @@ Notes:
 		lines := strings.Split(string(content), "\n")
 		var defs []VariableDefinition
 		var builder strings.Builder
-		builder.WriteString("#Variable definitions are generated through GlimmerWorksBuilder. Please do not edit them.\n")
+		builder.WriteString("#Variable definitions are generated through GlimmerWorksCli. Please do not edit them.\n")
 		builder.WriteString("#The dependencies of the repository can be defined through comments.\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)

@@ -1,6 +1,6 @@
 package main
 
-import "GlimmerWorksBuilder/cmd"
+import "GlimmerWorksCli/cmd"
 
 func main() {
 	cmd.Execute()

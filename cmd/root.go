@@ -7,7 +7,7 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "GlimmerWorksBuilder",
+	Use:   "GlimmerWorksCli",
 	Short: "Build and manage dependencies for GlimmerWorks projects",
 	Long:  `Build and manage dependencies for GlimmerWorks projects`,
 }
