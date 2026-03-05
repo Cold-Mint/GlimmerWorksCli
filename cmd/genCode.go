@@ -8,12 +8,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"text/template"
+
+	"github.com/spf13/cobra"
 )
 
 // 正则表达式预编译（全面升级）
@@ -29,54 +29,6 @@ var (
 	// 匹配//@genNextLine(注解内容)，提取括号内的全部内容（支持|分隔的中英文）
 	genNextLineNoteRegex = regexp.MustCompile(`^//@genNextLine\((.+)\)$`)
 )
-
-// C++ toml反序列化模板
-const cppTemplateStr = `#include <toml++/toml.h>
-#include "glimmer/mod/Resource.h"
-#include "glimmer/mod/ResourceRef.h"
-
-using namespace toml;
-
-{{range $class, $fields := .ClassFields}}
-template<>
-struct from<glimmer::{{$class}}> {
-    static glimmer::{{$class}} from_toml(const value &v) {
-        glimmer::{{$class}} obj;
-        {{/* 先处理父类字段 */}}
-        {{if $parent := index $.ClassParents $class}}
-        // Inherit from glimmer::{{$parent}}
-        auto parentObj = from<glimmer::{{$parent}}>::from_toml(v);
-        obj = static_cast<glimmer::{{$class}}>(parentObj);
-        {{end}}
-        
-        {{/* 处理当前类字段 */}}
-        {{range $fields}}
-        {{if strings.Contains .Type "std::vector"}}
-        // Vector field: {{.Name}}
-        auto {{.Name}}_val = find_or_default<{{.Type}}>(v, "{{.Name}}");
-        for (auto &item : {{.Name}}_val) {
-            obj.Add{{strings.Title .Name}}(item);
-        }
-        {{else if eq .Type "bool"}}
-        // Bool field: {{.Name}}
-        obj.Set{{strings.Title .Name}}(find_or_default<bool>(v, "{{.Name}}", {{.Default}}));
-        {{else if eq .Type "int" || eq .Type "uint32_t" || eq .Type "uint64_t" || eq .Type "float" || eq .Type "uint8_t"}}
-        // Numeric field: {{.Name}}
-        obj.Set{{strings.Title .Name}}(find_or_default<{{.Type}}>(v, "{{.Name}}", {{.Default}}));
-        {{else if eq .Type "std::string"}}
-        // String field: {{.Name}}
-        obj.Set{{strings.Title .Name}}(find_or_default<std::string>(v, "{{.Name}}", "{{.Default}}"));
-        {{else}}
-        // Custom type field: {{.Name}}
-        obj.Set{{strings.Title .Name}}(from<{{.Type}}>::from_toml(find(v, "{{.Name}}")));
-        {{end}}
-        {{end}}
-        
-        return obj;
-    }
-};
-{{end}}
-`
 
 // parseClassInfo 解析类/结构体定义行，返回类名和父类名
 func parseClassInfo(line string) (className, parentClassName string) {
@@ -101,7 +53,12 @@ func parseGenNextLineNote(line string) string {
 }
 
 // processGenCodeFile 完全重构：先解析所有类定义，再处理标记
-func processGenCodeFile(filePath string, fieldMetas *[]meta.FieldMeta) {
+func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]meta.FieldMeta) {
+	relativePath, err := filepath.Rel(outPutFilePath, filePath)
+	if err != nil {
+		fmt.Printf("Failed to get relative path for %s: %v\n", filePath, err)
+		return
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Printf("Failed to open file %s: %v\n", filePath, err)
@@ -213,92 +170,133 @@ func processGenCodeFile(filePath string, fieldMetas *[]meta.FieldMeta) {
 
 		// 提取字段信息
 		fieldType := strings.TrimSpace(fieldMatches[1])
+		if fieldType != "std::string" && fieldType != "float" && fieldType != "int" && fieldType != "bool" && fieldType != "uint32_t" && fieldType != "uint64_t" && fieldType != "uint8_t" && !strings.Contains(fieldType, "::") {
+			fieldType = "glimmer::" + fieldType
+		}
+		if strings.HasPrefix(fieldType, "std::vector<") {
+			fieldType = "std::vector<glimmer::" + fieldType[12:]
+		}
 		fieldName := strings.TrimSpace(fieldMatches[2])
 		fieldDefault := strings.TrimSpace(fieldMatches[4])
-
-		// 处理默认值格式（字符串加引号，布尔值小写，空值处理）
-		switch {
-		case fieldDefault == "":
-			// 根据类型设置默认值
-			switch fieldType {
-			case "std::string":
-				fieldDefault = `""`
-			case "bool":
-				fieldDefault = "false"
-			case "int", "uint32_t", "uint64_t", "float", "uint8_t":
-				fieldDefault = "0"
-			default:
-				fieldDefault = ""
-			}
-		case fieldType == "std::string" && !strings.HasPrefix(fieldDefault, "\""):
-			fieldDefault = fmt.Sprintf(`"%s"`, fieldDefault)
-		case fieldType == "bool":
-			fieldDefault = strings.ToLower(fieldDefault)
-		}
-
-		// 添加到FieldMeta（新增Note字段）
 		*fieldMetas = append(*fieldMetas, meta.FieldMeta{
-			ClassName:       currentClassName,
-			ParentClassName: currentParentName,
+			RelativePath:    relativePath,
+			ClassName:       "glimmer::" + currentClassName,
+			ParentClassName: "glimmer::" + currentParentName,
 			Type:            fieldType,
 			Name:            fieldName,
 			Default:         fieldDefault,
-			Note:            note, // 填充注解内容
+			Note:            note,
 		})
 	}
 
 	fmt.Println("=== Processing completed ===\n")
 }
 
-// generateCPPFile 生成C++ toml反序列化代码文件
-func generateCPPFile(outputPath string, fieldMetas []meta.FieldMeta) error {
-	// 整理类字段和父类映射
-	classFields := make(map[string][]meta.FieldMeta) // 类名 -> 字段列表
-	classParents := make(map[string]string)          // 类名 -> 父类名
-	seenClasses := make(map[string]bool)
+// generateCPPHeaderFile 生成匹配示例格式的C++头文件
+func generateCPPHeaderFile(outputPath string, fieldMetas []meta.FieldMeta) error {
+	var headerContent strings.Builder
+	headerContent.WriteString("// Auto-generated by GlimmerWorksCli\n")
+	headerContent.WriteString("// Do not edit manually!\n\n")
+	headerContent.WriteString("#pragma once\n\n")
+	headerContent.WriteString("#include \"toml11/find.hpp\"\n")
 
-	// 分组字段并记录父类
+	var bodyContent strings.Builder
+	bodyContent.WriteString("namespace toml {\n\n")
+	bodyContent.WriteString("    template<>\n")
+	bodyContent.WriteString("    struct from<glimmer::ResourceRef> {\n")
+	bodyContent.WriteString("        static glimmer::ResourceRef from_toml(const value &v) {\n")
+	bodyContent.WriteString("            glimmer::ResourceRef r;\n")
+	bodyContent.WriteString("            r.SetPackageId(toml::find<std::string>(v, \"packId\"));\n")
+	bodyContent.WriteString("            r.SetResourceType(glimmer::ResourceRef::ResolveResourceType(toml::find<std::string>(v, \"resourceType\")));\n")
+	bodyContent.WriteString("            r.SetResourceKey(toml::find<std::string>(v, \"resourceKey\"));\n")
+	bodyContent.WriteString("            auto arg = toml::find_or_default<std::vector<glimmer::ResourceRefArg> >(v, \"args\");\n")
+	bodyContent.WriteString("            for (auto &resourceRefArg: arg) {\n")
+	bodyContent.WriteString("                r.AddArg(resourceRefArg);\n")
+	bodyContent.WriteString("            }\n")
+	bodyContent.WriteString("            return r;\n")
+	bodyContent.WriteString("        }\n")
+	bodyContent.WriteString("    };\n")
+	bodyContent.WriteString("\n\n")
+	bodyContent.WriteString("    template<>\n")
+	bodyContent.WriteString("    struct from<glimmer::ResourceRefArg> {\n")
+	bodyContent.WriteString("        static glimmer::ResourceRefArg from_toml(const value &v) {\n")
+	bodyContent.WriteString("            glimmer::ResourceRefArg r;\n")
+	bodyContent.WriteString("            r.SetName(toml::find<std::string>(v, \"name\"));\n")
+	bodyContent.WriteString("            uint32_t argType = glimmer::ResourceRefArg::ResolveResourceRefArgType(toml::find<std::string>(v, \"type\"));\n")
+	bodyContent.WriteString("            if (argType == RESOURCE_REF_ARG_TYPE_INT) {\n")
+	bodyContent.WriteString("            r.SetDataFromInt(toml::find<int>(v, \"data\"));\n")
+	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_FLOAT) {\n")
+	bodyContent.WriteString("            r.SetDataFromFloat(toml::find<float>(v, \"data\"));\n")
+	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_BOOL) {\n")
+	bodyContent.WriteString("            r.SetDataFromBool(toml::find<bool>(v, \"data\"));\n")
+	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_STRING) {\n")
+	bodyContent.WriteString("            r.SetDataFromString(toml::find<std::string>(v, \"data\"));\n")
+	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_REF_TOML) {\n")
+	bodyContent.WriteString("            glimmer::ResourceRef resource = toml::find<glimmer::ResourceRef>(v, \"data\");\n")
+	bodyContent.WriteString("            r.SetDataFromResourceRef(resource);\n")
+	bodyContent.WriteString("            ")
+	bodyContent.WriteString("         }\n")
+	bodyContent.WriteString("         return r;\n")
+	bodyContent.WriteString("    }\n")
+	bodyContent.WriteString("    };\n")
+	bodyContent.WriteString("\n\n")
+	classFields := make(map[string][]meta.FieldMeta)
+	pathSet := make(map[string]struct{})
 	for _, fm := range fieldMetas {
 		if fm.ClassName == "" {
 			continue
 		}
-		classFields[fm.ClassName] = append(classFields[fm.ClassName], fm)
-		if fm.ParentClassName != "" && !seenClasses[fm.ClassName] {
-			classParents[fm.ClassName] = fm.ParentClassName
-			seenClasses[fm.ClassName] = true
+		if fm.RelativePath != "" {
+			pathSet[fm.RelativePath] = struct{}{}
 		}
+		classFields[fm.ClassName] = append(classFields[fm.ClassName], fm)
 	}
-
-	// 创建模板函数映射
-	funcMap := template.FuncMap{
-		"strings.Contains": strings.Contains,
-		"strings.Title":    strings.Title,
-		"eq":               eq,
+	if len(pathSet) > 0 {
+		headerContent.WriteString("// Include original header files\n")
+		for path := range pathSet {
+			headerContent.WriteString(fmt.Sprintf("#include \"%s\"\n", path))
+		}
+		headerContent.WriteString("\n\n")
 	}
+	for className, fields := range classFields {
+		bodyContent.WriteString("    template<>\n")
+		bodyContent.WriteString("    struct from<")
+		bodyContent.WriteString(className)
+		bodyContent.WriteString("> {\n")
+		bodyContent.WriteString("        static ")
+		bodyContent.WriteString(className)
+		bodyContent.WriteString(" from_toml(const value &v) {\n")
+		bodyContent.WriteString("            ")
+		bodyContent.WriteString(className)
+		bodyContent.WriteString(" r;\n")
+		for _, fm := range fields {
+			bodyContent.WriteString("            r.")
+			bodyContent.WriteString(fm.Name)
+			bodyContent.WriteString(" = toml::find<")
+			bodyContent.WriteString(fm.Type)
+			bodyContent.WriteString(">")
 
-	// 解析模板
-	tpl, err := template.New("cpp_toml").Funcs(funcMap).Parse(cppTemplateStr)
+			bodyContent.WriteString("(v, \"")
+			bodyContent.WriteString(fm.Name)
+			bodyContent.WriteString("\");\n")
+		}
+		bodyContent.WriteString("            return r;\n")
+		bodyContent.WriteString("        }\n")
+		bodyContent.WriteString("    };\n\n")
+	}
+	bodyContent.WriteString("}\n")
+	filePath := filepath.Join(outputPath, "FieldMeta.gen.h")
+	file, err := os.Create(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to parse cpp template: %v", err)
-	}
-
-	// 创建输出文件
-	file, err := os.Create(filepath.Join(outputPath, "toml_deserializer.gen.cpp"))
-	if err != nil {
-		return fmt.Errorf("failed to create cpp file: %v", err)
+		return fmt.Errorf("failed to create C++ header file: %v", err)
 	}
 	defer file.Close()
-
-	// 渲染模板
-	data := map[string]interface{}{
-		"ClassFields":  classFields,
-		"ClassParents": classParents,
-	}
-	if err := tpl.Execute(file, data); err != nil {
-		return fmt.Errorf("failed to render cpp template: %v", err)
+	_, err = file.WriteString(headerContent.String() + bodyContent.String())
+	if err != nil {
+		return fmt.Errorf("failed to write C++ header file: %v", err)
 	}
 
-	fmt.Printf("Successfully generated C++ file: %s\n", filepath.Join(outputPath, "toml_deserializer.gen.cpp"))
+	fmt.Printf("Successfully generated C++ header file: %s\n", filePath)
 	return nil
 }
 
@@ -326,16 +324,11 @@ func generateJSONFile(outputPath string, fieldMetas []meta.FieldMeta) error {
 	return nil
 }
 
-// eq 模板函数：相等判断（兼容template包）
-func eq(a, b interface{}) bool {
-	return a == b
-}
-
 // genCodeCmd 优化输出格式，新增文件生成功能
 var genCodeCmd = &cobra.Command{
 	Use:   "genCode",
 	Short: "Parse C++ files with //@genCode annotation and generate FieldMeta",
-	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info (type/name/default/note) and output FieldMeta/C++/JSON files.`,
+	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info (type/name/default/note) and output FieldMeta/C++ Header/JSON files.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		dir, err := os.Getwd()
 		if err != nil {
@@ -375,7 +368,7 @@ var genCodeCmd = &cobra.Command{
 				return nil
 			}
 
-			processGenCodeFile(path, &fieldMetas)
+			processGenCodeFile(outputPath, path, &fieldMetas)
 			return nil
 		})
 
@@ -385,26 +378,26 @@ var genCodeCmd = &cobra.Command{
 			fmt.Println("No FieldMeta found.")
 		} else {
 			// 表头（调整列宽，新增Note列）
-			fmt.Printf("%-4s %-25s %-20s %-30s %-20s %-20s %s\n",
-				"NO", "Class", "Parent Class", "Type", "Name", "Default", "Note")
-			fmt.Println(strings.Repeat("-", 150))
+			fmt.Printf("%-4s %-30s %-25s %-20s %-30s %-20s %-20s %s\n",
+				"NO", "RelativePath", "Class", "Parent Class", "Type", "Name", "Default", "Note")
+			fmt.Println(strings.Repeat("-", 180))
 			// 内容
 			for i, fm := range fieldMetas {
 				parent := fm.ParentClassName
 				if parent == "" {
 					parent = "-"
 				}
-				fmt.Printf("%-4d %-25s %-20s %-30s %-20s %-20s %s\n",
-					i+1, fm.ClassName, parent, fm.Type, fm.Name, fm.Default, fm.Note)
+				fmt.Printf("%-4d %-30s %-25s %-20s %-30s %-20s %-20s %s\n",
+					i+1, fm.RelativePath, fm.ClassName, parent, fm.Type, fm.Name, fm.Default, fm.Note)
 			}
 		}
 
 		// 根据outputType生成文件
 		switch outputType {
 		case 1:
-			// 生成C++文件
-			if err := generateCPPFile(outputPath, fieldMetas); err != nil {
-				fmt.Printf("Failed to generate C++ file: %v\n", err)
+			// 生成C++头文件（匹配示例格式）
+			if err := generateCPPHeaderFile(outputPath, fieldMetas); err != nil {
+				fmt.Printf("Failed to generate C++ header file: %v\n", err)
 			}
 		case 2:
 			// 生成JSON文件
@@ -415,7 +408,7 @@ var genCodeCmd = &cobra.Command{
 			// 不生成文件
 			fmt.Println("=== No file generation (outputType=0) ===")
 		default:
-			fmt.Printf("Invalid outputType: %d (0=none, 1=cpp, 2=json)\n", outputType)
+			fmt.Printf("Invalid outputType: %d (0=none, 1=CPP header, 2=JSON meta info)\n", outputType)
 		}
 
 		if err != nil {
@@ -428,6 +421,6 @@ func init() {
 	rootCmd.AddCommand(genCodeCmd)
 	// 文件输出路径，如果为空，那么设置为os.Getwd()
 	genCodeCmd.Flags().StringP("outputPath", "o", "", "File output path (default: current directory)")
-	// 0为不输出，1为输出cpp文件，2为输出json文件。默认0
-	genCodeCmd.Flags().Int8P("outputType", "t", 0, "Output type (0=none, 1=CPP toml deserializer, 2=JSON meta info)")
+	// 0为不输出，1为输出cpp头文件，2为输出json文件。默认0
+	genCodeCmd.Flags().Int8P("outputType", "t", 0, "Output type (0=none, 1=CPP header (TomlUtils.h), 2=JSON meta info)")
 }
