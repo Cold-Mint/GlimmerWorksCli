@@ -8,4 +8,5 @@ type FieldMeta struct {
 	Type            string
 	Name            string
 	Default         string
+	Note            string
 }

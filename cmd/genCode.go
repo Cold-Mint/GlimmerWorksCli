@@ -24,6 +24,8 @@ var (
 	// 匹配字段行（支持复杂类型+默认值）
 	// 支持：std::string name; / std::vector<MobAppearanceResource> appearance; / uint32_t argType_ = XXX;
 	fieldRegex = regexp.MustCompile(`^((?:[a-zA-Z0-9_:]+)(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
+	// 匹配//@genNextLine(注解内容)，提取括号内的全部内容（支持|分隔的中英文）
+	genNextLineNoteRegex = regexp.MustCompile(`^//@genNextLine\((.+)\)$`)
 )
 
 // parseClassInfo 解析类/结构体定义行，返回类名和父类名
@@ -37,6 +39,15 @@ func parseClassInfo(line string) (className, parentClassName string) {
 		return classMatches[2], ""
 	}
 	return "", ""
+}
+
+// parseGenNextLineNote 解析//@genNextLine标记行，提取括号内的注解内容
+func parseGenNextLineNote(line string) string {
+	matches := genNextLineNoteRegex.FindStringSubmatch(line)
+	if len(matches) >= 2 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
 }
 
 // processGenCodeFile 完全重构：先解析所有类定义，再处理标记
@@ -107,12 +118,15 @@ func processGenCodeFile(filePath string, fieldMetas *[]meta.FieldMeta) {
 		}
 	}
 
-	// 第四步：遍历所有//@genNextLine标记，解析字段
+	// 第四步：遍历所有//@genNextLine标记，解析字段和注解
 	for lineIdx, line := range lines {
 		// 匹配标记行
 		if !strings.HasPrefix(line, "//@genNextLine(") {
 			continue
 		}
+
+		// 提取标记行的注解内容
+		note := parseGenNextLineNote(line)
 
 		// 标记行的下一行索引
 		fieldLineIdx := lineIdx + 1
@@ -121,7 +135,7 @@ func processGenCodeFile(filePath string, fieldMetas *[]meta.FieldMeta) {
 			continue
 		}
 		fieldLine := lines[fieldLineIdx]
-		fmt.Printf("Line %d: Found genNextLine mark, field line: %s\n", lineIdx+1, fieldLine)
+		fmt.Printf("Line %d: Found genNextLine mark [Note: %s], field line: %s\n", lineIdx+1, note, fieldLine)
 
 		// 先检查下一行是否是类定义行（更新类名映射）
 		cn, _ := parseClassInfo(fieldLine)
@@ -152,24 +166,25 @@ func processGenCodeFile(filePath string, fieldMetas *[]meta.FieldMeta) {
 		fieldName := strings.TrimSpace(fieldMatches[2])
 		fieldDefault := strings.TrimSpace(fieldMatches[4])
 
-		// 添加到FieldMeta
+		// 添加到FieldMeta（新增Note字段）
 		*fieldMetas = append(*fieldMetas, meta.FieldMeta{
 			ClassName:       currentClassName,
 			ParentClassName: currentParentName,
 			Type:            fieldType,
 			Name:            fieldName,
 			Default:         fieldDefault,
+			Note:            note, // 填充注解内容
 		})
 	}
 
 	fmt.Println("=== Processing completed ===\n")
 }
 
-// genCodeCmd 保持不变，仅优化输出格式
+// genCodeCmd 优化输出格式，新增Note列
 var genCodeCmd = &cobra.Command{
 	Use:   "genCode",
 	Short: "Parse C++ files with //@genCode annotation and generate FieldMeta",
-	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info (type/name/default) and output FieldMeta.`,
+	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info (type/name/default/note) and output FieldMeta.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		dir, err := os.Getwd()
 		if err != nil {
@@ -195,23 +210,23 @@ var genCodeCmd = &cobra.Command{
 			return nil
 		})
 
-		// 输出优化：对齐显示
+		// 输出优化：新增Note列，对齐显示
 		fmt.Println("=== All FieldMeta Information ===")
 		if len(fieldMetas) == 0 {
 			fmt.Println("No FieldMeta found.")
 		} else {
-			// 表头
-			fmt.Printf("%-4s %-25s %-20s %-30s %-20s %s\n",
-				"NO", "Class", "Parent Class", "Type", "Name", "Default")
-			fmt.Println(strings.Repeat("-", 120))
+			// 表头（调整列宽，新增Note列）
+			fmt.Printf("%-4s %-25s %-20s %-30s %-20s %-20s %s\n",
+				"NO", "Class", "Parent Class", "Type", "Name", "Default", "Note")
+			fmt.Println(strings.Repeat("-", 150))
 			// 内容
 			for i, fm := range fieldMetas {
 				parent := fm.ParentClassName
 				if parent == "" {
 					parent = "-"
 				}
-				fmt.Printf("%-4d %-25s %-20s %-30s %-20s %s\n",
-					i+1, fm.ClassName, parent, fm.Type, fm.Name, fm.Default)
+				fmt.Printf("%-4d %-25s %-20s %-30s %-20s %-20s %s\n",
+					i+1, fm.ClassName, parent, fm.Type, fm.Name, fm.Default, fm.Note)
 			}
 		}
 
