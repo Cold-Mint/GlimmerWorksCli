@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// 正则表达式预编译（全面升级）
 var (
 	// 匹配类/结构体定义行（优先处理）
 	// 支持：struct Resource { / struct StringResource : Resource { / class ResourceRefArg {
@@ -28,6 +27,10 @@ var (
 	fieldRegex = regexp.MustCompile(`^((?:[a-zA-Z0-9_:]+)(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
 	// 匹配//@genNextLine(注解内容)，提取括号内的全部内容（支持|分隔的中英文）
 	genNextLineNoteRegex = regexp.MustCompile(`^//@genNextLine\((.+)\)$`)
+	// 新增：解析//@namespace(xxx)注解
+	namespaceAnnotationRegex = regexp.MustCompile(`^//@namespace\((.+)\)$`)
+	// 新增：解析namespace xxx { 代码行
+	namespaceCodeRegex = regexp.MustCompile(`^namespace\s+([a-zA-Z0-9_]+)\s*\{`)
 )
 
 // parseClassInfo 解析类/结构体定义行，返回类名和父类名
@@ -124,6 +127,41 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			}
 		}
 	}
+	var namespaceMarks []meta.NamespaceMark
+	var currentFileNamespace string // 兜底的全局命名空间（代码行解析的）
+
+	// 遍历所有行，收集命名空间标记
+	for lineIdx, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// 1. 解析//@namespace(xxx)注解（优先级最高）
+		if matches := namespaceAnnotationRegex.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
+			ns := strings.TrimSpace(matches[1])
+			if ns != "" && !strings.HasSuffix(ns, "::") {
+				ns += "::"
+			}
+			namespaceMarks = append(namespaceMarks, meta.NamespaceMark{
+				LineIdx:   lineIdx,
+				Namespace: ns,
+			})
+			continue
+		}
+
+		// 2. 解析namespace xxx {代码行（作为兜底）
+		if matches := namespaceCodeRegex.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
+			ns := strings.TrimSpace(matches[1])
+			if ns != "" && !strings.HasSuffix(ns, "::") {
+				ns += "::"
+			}
+			currentFileNamespace = ns // 全局兜底命名空间
+			// 也可以加入标记列表（如果需要）
+			namespaceMarks = append(namespaceMarks, meta.NamespaceMark{
+				LineIdx:   lineIdx,
+				Namespace: ns,
+			})
+			continue
+		}
+	}
 
 	// 第四步：遍历所有//@genNextLine标记，解析字段和注解
 	for lineIdx, line := range lines {
@@ -168,20 +206,58 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			}
 		}
 
+		// 新增核心逻辑：根据字段行号，找到当前生效的命名空间
+		var currentNamespace string
+		// 遍历所有命名空间标记，找到「字段行号之前最后一个」标记
+		for _, nm := range namespaceMarks {
+			if nm.LineIdx < fieldLineIdx { // 标记在行号之前才生效
+				currentNamespace = nm.Namespace
+			} else {
+				break // 后续标记行号更大，无需继续
+			}
+		}
+		// 兜底：如果没有注解标记，使用代码行解析的全局命名空间
+		if currentNamespace == "" {
+			currentNamespace = currentFileNamespace
+		}
+
 		// 提取字段信息
 		fieldType := strings.TrimSpace(fieldMatches[1])
-		if fieldType != "std::string" && fieldType != "float" && fieldType != "int" && fieldType != "bool" && fieldType != "uint32_t" && fieldType != "uint64_t" && fieldType != "uint8_t" && !strings.Contains(fieldType, "::") {
-			fieldType = "glimmer::" + fieldType
+		// 补全字段类型的命名空间（自定义类型）
+		if !strings.Contains(fieldType, "::") {
+			switch fieldType {
+			case "bool", "int", "uint32_t", "uint64_t", "float", "uint8_t", "size_t", "std::string":
+				break // 基础类型不补全
+			default:
+				fieldType = currentNamespace + fieldType
+			}
 		}
+		// 处理std::vector<XXX>类型的命名空间补全
 		if strings.HasPrefix(fieldType, "std::vector<") {
-			fieldType = "std::vector<glimmer::" + fieldType[12:]
+			// 提取vector内部类型（去掉std::vector<和>）
+			innerType := strings.TrimSuffix(strings.TrimPrefix(fieldType, "std::vector<"), ">")
+			if !strings.Contains(innerType, "::") {
+				innerType = currentNamespace + innerType
+			}
+			fieldType = "std::vector<" + innerType + ">"
 		}
+
 		fieldName := strings.TrimSpace(fieldMatches[2])
 		fieldDefault := strings.TrimSpace(fieldMatches[4])
+
+		// 补全类名和父类名的命名空间
+		if currentClassName != "" && !strings.Contains(currentClassName, "::") {
+			currentClassName = currentNamespace + currentClassName
+		}
+		if currentParentName != "" && !strings.Contains(currentParentName, "::") {
+			currentParentName = currentNamespace + currentParentName
+		}
+
+		// 添加到FieldMeta（使用当前生效的命名空间）
 		*fieldMetas = append(*fieldMetas, meta.FieldMeta{
 			RelativePath:    relativePath,
-			ClassName:       "glimmer::" + currentClassName,
-			ParentClassName: "glimmer::" + currentParentName,
+			ClassName:       currentClassName,
+			ParentClassName: currentParentName,
 			Type:            fieldType,
 			Name:            fieldName,
 			Default:         fieldDefault,
@@ -201,45 +277,6 @@ func generateCPPHeaderFile(outputPath string, fieldMetas []meta.FieldMeta) error
 	headerContent.WriteString("#include \"toml11/find.hpp\"\n")
 
 	var bodyContent strings.Builder
-	bodyContent.WriteString("namespace toml {\n\n")
-	bodyContent.WriteString("    template<>\n")
-	bodyContent.WriteString("    struct from<glimmer::ResourceRef> {\n")
-	bodyContent.WriteString("        static glimmer::ResourceRef from_toml(const value &v) {\n")
-	bodyContent.WriteString("            glimmer::ResourceRef r;\n")
-	bodyContent.WriteString("            r.SetPackageId(toml::find<std::string>(v, \"packId\"));\n")
-	bodyContent.WriteString("            r.SetResourceType(glimmer::ResourceRef::ResolveResourceType(toml::find<std::string>(v, \"resourceType\")));\n")
-	bodyContent.WriteString("            r.SetResourceKey(toml::find<std::string>(v, \"resourceKey\"));\n")
-	bodyContent.WriteString("            auto arg = toml::find_or_default<std::vector<glimmer::ResourceRefArg> >(v, \"args\");\n")
-	bodyContent.WriteString("            for (auto &resourceRefArg: arg) {\n")
-	bodyContent.WriteString("                r.AddArg(resourceRefArg);\n")
-	bodyContent.WriteString("            }\n")
-	bodyContent.WriteString("            return r;\n")
-	bodyContent.WriteString("        }\n")
-	bodyContent.WriteString("    };\n")
-	bodyContent.WriteString("\n\n")
-	bodyContent.WriteString("    template<>\n")
-	bodyContent.WriteString("    struct from<glimmer::ResourceRefArg> {\n")
-	bodyContent.WriteString("        static glimmer::ResourceRefArg from_toml(const value &v) {\n")
-	bodyContent.WriteString("            glimmer::ResourceRefArg r;\n")
-	bodyContent.WriteString("            r.SetName(toml::find<std::string>(v, \"name\"));\n")
-	bodyContent.WriteString("            uint32_t argType = glimmer::ResourceRefArg::ResolveResourceRefArgType(toml::find<std::string>(v, \"type\"));\n")
-	bodyContent.WriteString("            if (argType == RESOURCE_REF_ARG_TYPE_INT) {\n")
-	bodyContent.WriteString("            r.SetDataFromInt(toml::find<int>(v, \"data\"));\n")
-	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_FLOAT) {\n")
-	bodyContent.WriteString("            r.SetDataFromFloat(toml::find<float>(v, \"data\"));\n")
-	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_BOOL) {\n")
-	bodyContent.WriteString("            r.SetDataFromBool(toml::find<bool>(v, \"data\"));\n")
-	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_STRING) {\n")
-	bodyContent.WriteString("            r.SetDataFromString(toml::find<std::string>(v, \"data\"));\n")
-	bodyContent.WriteString("            } else if (argType == RESOURCE_REF_ARG_TYPE_REF_TOML) {\n")
-	bodyContent.WriteString("            glimmer::ResourceRef resource = toml::find<glimmer::ResourceRef>(v, \"data\");\n")
-	bodyContent.WriteString("            r.SetDataFromResourceRef(resource);\n")
-	bodyContent.WriteString("            ")
-	bodyContent.WriteString("         }\n")
-	bodyContent.WriteString("         return r;\n")
-	bodyContent.WriteString("    }\n")
-	bodyContent.WriteString("    };\n")
-	bodyContent.WriteString("\n\n")
 	classFields := make(map[string][]meta.FieldMeta)
 	pathSet := make(map[string]struct{})
 	for _, fm := range fieldMetas {
