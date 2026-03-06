@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -298,7 +299,6 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		headerContent.WriteString("\n")
 	}
 
-	// 生成toml_utils模板代码（原逻辑保留）
 	var bodyContent strings.Builder
 	classFields := make(map[string][]meta.FieldMeta)
 	for _, fm := range fieldMetas {
@@ -308,8 +308,15 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		classFields[fm.ClassName] = append(classFields[fm.ClassName], fm)
 	}
 
+	// 1. 提取类依赖关系
+	depsMap := extractClassDependencies(classFields)
+	// 2. 拓扑排序（被依赖的类优先）
+	sortedClasses := topologicalSort(depsMap)
+
+	// 3. 按拓扑排序后的顺序生成代码
 	bodyContent.WriteString("namespace toml {\n\n")
-	for className, fields := range classFields {
+	for _, className := range sortedClasses {
+		fields := classFields[className]
 		bodyContent.WriteString("    template<>\n")
 		bodyContent.WriteString("    struct from<")
 		bodyContent.WriteString(className)
@@ -378,6 +385,108 @@ func generateJSONFile(outputPath string, fieldMetas []meta.FieldMeta) error {
 
 	fmt.Printf("Successfully generated JSON file: %s\n", filepath.Join(outputPath, "field_meta.gen.json"))
 	return nil
+}
+
+// extractClassDependencies 提取所有类的依赖关系
+func extractClassDependencies(classFields map[string][]meta.FieldMeta) map[string]meta.ClassDependency {
+	depsMap := make(map[string]meta.ClassDependency)
+	// 匹配自定义类的正则（排除基础类型/std::xxx）
+	basicTypeRegex := regexp.MustCompile(`^(bool|int|uint8_t|uint32_t|uint64_t|float|size_t|std::string|std::vector<.+>)$`)
+	// 提取vector内部类型的正则
+	vectorRegex := regexp.MustCompile(`^std::vector<(.+)>$`)
+
+	// 第一步：收集所有类名
+	allClasses := make(map[string]bool)
+	for className := range classFields {
+		allClasses[className] = true
+	}
+
+	// 第二步：分析每个类的依赖
+	for className, fields := range classFields {
+		deps := make(map[string]bool) // 去重存储依赖
+		for _, fm := range fields {
+			fieldType := fm.Type
+			// 跳过基础类型
+			if basicTypeRegex.MatchString(fieldType) {
+				continue
+			}
+			// 解析vector内部类型
+			if matches := vectorRegex.FindStringSubmatch(fieldType); len(matches) >= 2 {
+				fieldType = matches[1]
+			}
+			// 检查是否是自定义类（存在于allClasses中）
+			if allClasses[fieldType] {
+				deps[fieldType] = true
+			}
+		}
+		// 转换为切片
+		depList := make([]string, 0, len(deps))
+		for dep := range deps {
+			depList = append(depList, dep)
+		}
+		depsMap[className] = meta.ClassDependency{
+			ClassName: className,
+			Deps:      depList,
+		}
+	}
+	return depsMap
+}
+
+// topologicalSort 对类进行拓扑排序（被依赖的类优先）
+func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
+	// 1. 构建入度表和邻接表
+	inDegree := make(map[string]int)
+	adj := make(map[string][]string)
+	// 初始化
+	for className := range depsMap {
+		inDegree[className] = 0
+		adj[className] = []string{}
+	}
+	// 填充入度和邻接表
+	for className, dep := range depsMap {
+		for _, d := range dep.Deps {
+			adj[d] = append(adj[d], className) // d -> className（d被className依赖）
+			inDegree[className]++              // className的入度+1
+		}
+	}
+
+	// 2. 拓扑排序（Kahn算法）
+	var queue []string
+	// 入度为0的类（无依赖）先入队
+	for className, degree := range inDegree {
+		if degree == 0 {
+			queue = append(queue, className)
+		}
+	}
+
+	// 3. 处理队列
+	var sortedClasses []string
+	for len(queue) > 0 {
+		// 取出队首元素
+		current := queue[0]
+		queue = queue[1:]
+		sortedClasses = append(sortedClasses, current)
+		// 处理当前类的邻接节点
+		for _, neighbor := range adj[current] {
+			inDegree[neighbor]--
+			if inDegree[neighbor] == 0 {
+				queue = append(queue, neighbor)
+			}
+		}
+	}
+
+	// 4. 检查是否有环（理论上C++类无环，此处仅容错）
+	if len(sortedClasses) != len(depsMap) {
+		fmt.Println("Warning: 检测到类依赖环，使用原始顺序兜底")
+		// 兜底：返回原始类名排序
+		sortedClasses = make([]string, 0, len(depsMap))
+		for className := range depsMap {
+			sortedClasses = append(sortedClasses, className)
+		}
+		sort.Strings(sortedClasses)
+	}
+
+	return sortedClasses
 }
 
 // genCodeCmd 优化输出格式，新增文件生成功能
