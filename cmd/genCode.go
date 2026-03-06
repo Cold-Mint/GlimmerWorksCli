@@ -1,6 +1,3 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-*/
 package cmd
 
 import (
@@ -66,7 +63,6 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		fmt.Printf("Failed to get relative path for %s: %v\n", filePath, err)
 		return err
 	}
-	// 恢复原有的文件打开、按行读取逻辑
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file failed: %v", err)
@@ -86,8 +82,6 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 	if len(lines) == 0 || lines[0] != "//@genCode" {
 		return nil
 	}
-
-	// ========== 新增：解析@include和@content注解 ==========
 	var inContentBlock bool // 标记是否在//@content块内
 	var currentContent string
 	for _, line := range lines {
@@ -298,7 +292,6 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		}
 		headerContent.WriteString("\n")
 	}
-
 	var bodyContent strings.Builder
 	classFields := make(map[string][]meta.FieldMeta)
 	for _, fm := range fieldMetas {
@@ -308,15 +301,12 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		classFields[fm.ClassName] = append(classFields[fm.ClassName], fm)
 	}
 
-	// 1. 提取类依赖关系
 	depsMap := extractClassDependencies(classFields)
-	// 2. 拓扑排序（被依赖的类优先）
 	sortedClasses := topologicalSort(depsMap)
-
-	// 3. 按拓扑排序后的顺序生成代码
+	inheritanceMap := buildClassInheritance(classFields, fieldMetas)
 	bodyContent.WriteString("namespace toml {\n\n")
 	for _, className := range sortedClasses {
-		fields := classFields[className]
+		allFields := collectAllFields(className, classFields, inheritanceMap)
 		bodyContent.WriteString("    template<>\n")
 		bodyContent.WriteString("    struct from<")
 		bodyContent.WriteString(className)
@@ -327,26 +317,43 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		bodyContent.WriteString("            ")
 		bodyContent.WriteString(className)
 		bodyContent.WriteString(" r;\n")
-		for _, fm := range fields {
+		for _, fm := range allFields {
 			bodyContent.WriteString("            r.")
 			bodyContent.WriteString(fm.Name)
-			bodyContent.WriteString(" = toml::find<")
-			bodyContent.WriteString(fm.Type)
-			bodyContent.WriteString(">")
-			bodyContent.WriteString("(v, \"")
-			bodyContent.WriteString(fm.Name)
-			bodyContent.WriteString("\");\n")
+			if fm.Default == "" {
+				bodyContent.WriteString(" = toml::find<")
+				bodyContent.WriteString(fm.Type)
+				bodyContent.WriteString(">")
+				bodyContent.WriteString("(v, \"")
+				bodyContent.WriteString(fm.Name)
+				bodyContent.WriteString("\");\n")
+			} else {
+				bodyContent.WriteString(" = toml::find_or<")
+				bodyContent.WriteString(fm.Type)
+				bodyContent.WriteString(">")
+				bodyContent.WriteString("(v, \"")
+				bodyContent.WriteString(fm.Name)
+				bodyContent.WriteString("\",")
+				if fm.Type == "std::string" {
+					bodyContent.WriteString("\"")
+				}
+				bodyContent.WriteString(fm.Default)
+				if fm.Type == "std::string" {
+					bodyContent.WriteString("\");")
+				} else {
+					bodyContent.WriteString(");")
+				}
+				bodyContent.WriteString("\n")
+			}
+
 		}
+
 		bodyContent.WriteString("            return r;\n")
 		bodyContent.WriteString("        }\n")
 		bodyContent.WriteString("    };\n\n")
 	}
 	bodyContent.WriteString("}\n")
-
-	// 合并内容
 	headerContent.WriteString(bodyContent.String())
-
-	// 生成文件（仅执行一次）
 	filePath := filepath.Join(outPutFilePath, "TomlUtils.h")
 	file, err := os.Create(filePath)
 	if err != nil {
@@ -363,22 +370,65 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 	return nil
 }
 
+// buildClassInheritance 构建类的继承层级（子类→父类映射）
+func buildClassInheritance(classFields map[string][]meta.FieldMeta, fieldMetas []meta.FieldMeta) map[string]string {
+	inheritanceMap := make(map[string]string)
+	classParent := make(map[string]string)
+	for _, fm := range fieldMetas {
+		if fm.ClassName == "" || fm.ParentClassName == "" {
+			continue
+		}
+		parentName := fm.ParentClassName
+		if !strings.Contains(parentName, "::") && strings.Contains(fm.ClassName, "::") {
+			ns := strings.Split(fm.ClassName, "::")[0] + "::"
+			parentName = ns + parentName
+		}
+		classParent[fm.ClassName] = parentName
+	}
+	for className, parent := range classParent {
+		if _, exists := classFields[parent]; exists {
+			inheritanceMap[className] = parent
+		}
+	}
+
+	return inheritanceMap
+}
+
+// collectAllFields 递归收集类的所有字段（父类+子类）
+func collectAllFields(className string, classFields map[string][]meta.FieldMeta, inheritanceMap map[string]string) []meta.FieldMeta {
+	var allFields []meta.FieldMeta
+	if parent, exists := inheritanceMap[className]; exists {
+		parentFields := collectAllFields(parent, classFields, inheritanceMap)
+		allFields = append(allFields, parentFields...)
+	}
+
+	fieldNameSet := make(map[string]bool)
+	for _, f := range allFields {
+		fieldNameSet[f.Name] = true
+	}
+	currentFields := classFields[className]
+	for _, f := range currentFields {
+		if !fieldNameSet[f.Name] {
+			allFields = append(allFields, f)
+			fieldNameSet[f.Name] = true
+		}
+	}
+
+	return allFields
+}
+
 // generateJSONFile 生成JSON元信息文件
 func generateJSONFile(outputPath string, fieldMetas []meta.FieldMeta) error {
-	// 美化JSON输出
 	data, err := json.MarshalIndent(fieldMetas, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal json: %v", err)
 	}
-
-	// 创建输出文件
 	file, err := os.Create(filepath.Join(outputPath, "field_meta.gen.json"))
 	if err != nil {
 		return fmt.Errorf("failed to create json file: %v", err)
 	}
 	defer file.Close()
 
-	// 写入文件
 	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("failed to write json file: %v", err)
 	}
@@ -390,36 +440,26 @@ func generateJSONFile(outputPath string, fieldMetas []meta.FieldMeta) error {
 // extractClassDependencies 提取所有类的依赖关系
 func extractClassDependencies(classFields map[string][]meta.FieldMeta) map[string]meta.ClassDependency {
 	depsMap := make(map[string]meta.ClassDependency)
-	// 匹配自定义类的正则（排除基础类型/std::xxx）
 	basicTypeRegex := regexp.MustCompile(`^(bool|int|uint8_t|uint32_t|uint64_t|float|size_t|std::string|std::vector<.+>)$`)
-	// 提取vector内部类型的正则
 	vectorRegex := regexp.MustCompile(`^std::vector<(.+)>$`)
-
-	// 第一步：收集所有类名
 	allClasses := make(map[string]bool)
 	for className := range classFields {
 		allClasses[className] = true
 	}
-
-	// 第二步：分析每个类的依赖
 	for className, fields := range classFields {
-		deps := make(map[string]bool) // 去重存储依赖
+		deps := make(map[string]bool)
 		for _, fm := range fields {
 			fieldType := fm.Type
-			// 跳过基础类型
 			if basicTypeRegex.MatchString(fieldType) {
 				continue
 			}
-			// 解析vector内部类型
 			if matches := vectorRegex.FindStringSubmatch(fieldType); len(matches) >= 2 {
 				fieldType = matches[1]
 			}
-			// 检查是否是自定义类（存在于allClasses中）
 			if allClasses[fieldType] {
 				deps[fieldType] = true
 			}
 		}
-		// 转换为切片
 		depList := make([]string, 0, len(deps))
 		for dep := range deps {
 			depList = append(depList, dep)
@@ -434,39 +474,29 @@ func extractClassDependencies(classFields map[string][]meta.FieldMeta) map[strin
 
 // topologicalSort 对类进行拓扑排序（被依赖的类优先）
 func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
-	// 1. 构建入度表和邻接表
 	inDegree := make(map[string]int)
 	adj := make(map[string][]string)
-	// 初始化
 	for className := range depsMap {
 		inDegree[className] = 0
 		adj[className] = []string{}
 	}
-	// 填充入度和邻接表
 	for className, dep := range depsMap {
 		for _, d := range dep.Deps {
-			adj[d] = append(adj[d], className) // d -> className（d被className依赖）
-			inDegree[className]++              // className的入度+1
+			adj[d] = append(adj[d], className)
+			inDegree[className]++
 		}
 	}
-
-	// 2. 拓扑排序（Kahn算法）
 	var queue []string
-	// 入度为0的类（无依赖）先入队
 	for className, degree := range inDegree {
 		if degree == 0 {
 			queue = append(queue, className)
 		}
 	}
-
-	// 3. 处理队列
 	var sortedClasses []string
 	for len(queue) > 0 {
-		// 取出队首元素
 		current := queue[0]
 		queue = queue[1:]
 		sortedClasses = append(sortedClasses, current)
-		// 处理当前类的邻接节点
 		for _, neighbor := range adj[current] {
 			inDegree[neighbor]--
 			if inDegree[neighbor] == 0 {
@@ -474,11 +504,7 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 			}
 		}
 	}
-
-	// 4. 检查是否有环（理论上C++类无环，此处仅容错）
 	if len(sortedClasses) != len(depsMap) {
-		fmt.Println("Warning: 检测到类依赖环，使用原始顺序兜底")
-		// 兜底：返回原始类名排序
 		sortedClasses = make([]string, 0, len(depsMap))
 		for className := range depsMap {
 			sortedClasses = append(sortedClasses, className)
@@ -500,19 +526,12 @@ var genCodeCmd = &cobra.Command{
 			fmt.Printf("Failed to get current directory: %v\n", err)
 			return
 		}
-
-		// 解析命令行参数
 		outputPath, _ := cmd.Flags().GetString("outputPath")
 		outputType, _ := cmd.Flags().GetInt8("outputType")
-
-		// 设置默认输出路径
 		if outputPath == "" {
 			outputPath = dir
 		}
-
-		// 验证输出路径是否存在
 		if _, err := os.Stat(outputPath); os.IsNotExist(err) {
-			// 创建目录
 			if err := os.MkdirAll(outputPath, 0755); err != nil {
 				fmt.Printf("Failed to create output directory: %v\n", err)
 				return
@@ -520,9 +539,8 @@ var genCodeCmd = &cobra.Command{
 		}
 
 		var fieldMetas []meta.FieldMeta
-		var allIncludePaths []string  // 收集所有文件的include路径
-		var allContentBlocks []string // 收集所有文件的content内容块
-
+		var allIncludePaths []string
+		var allContentBlocks []string
 		err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				fmt.Printf("access file failed: %v\n", err)
@@ -531,19 +549,14 @@ var genCodeCmd = &cobra.Command{
 			if info.IsDir() {
 				return nil
 			}
-			// 仅处理指定后缀的文件（如.h/.cpp，可根据需要调整）
 			if !strings.HasSuffix(path, ".h") && !strings.HasSuffix(path, ".cpp") {
 				return nil
 			}
-
-			// 解析当前文件：收集字段和注解
 			var extraMeta meta.FileExtraMeta
 			if err := processGenCodeFile(outputPath, path, &fieldMetas, &extraMeta); err != nil {
 				fmt.Printf("process file %s failed: %v\n", path, err)
 				return err
 			}
-
-			// 合并当前文件的注解到全局
 			includeSet := make(map[string]struct{})
 			for _, path := range extraMeta.IncludePaths {
 				if path != "" {
@@ -570,17 +583,13 @@ var genCodeCmd = &cobra.Command{
 			fmt.Printf("walk dir failed: %v\n", err)
 			return
 		}
-
-		// 输出所有FieldMeta信息
 		fmt.Println("=== All FieldMeta Information ===")
 		if len(fieldMetas) == 0 {
 			fmt.Println("No FieldMeta found.")
 		} else {
-			// 表头（调整列宽，新增Note列）
 			fmt.Printf("%-4s %-30s %-25s %-20s %-30s %-20s %-20s %s\n",
 				"NO", "RelativePath", "Class", "Parent Class", "Type", "Name", "Default", "Note")
 			fmt.Println(strings.Repeat("-", 180))
-			// 内容
 			for i, fm := range fieldMetas {
 				parent := fm.ParentClassName
 				if parent == "" {
@@ -590,21 +599,16 @@ var genCodeCmd = &cobra.Command{
 					i+1, fm.RelativePath, fm.ClassName, parent, fm.Type, fm.Name, fm.Default, fm.Note)
 			}
 		}
-
-		// 根据outputType生成文件
 		switch outputType {
 		case 1:
-			// 生成C++头文件（传递include和content参数）
 			if err := generateCPPHeaderFile(outputPath, fieldMetas, allIncludePaths, allContentBlocks); err != nil {
 				fmt.Printf("generate header failed: %v\n", err)
 			}
 		case 2:
-			// 生成JSON文件
 			if err := generateJSONFile(outputPath, fieldMetas); err != nil {
 				fmt.Printf("Failed to generate JSON file: %v\n", err)
 			}
 		case 0:
-			// 不生成文件
 			fmt.Println("=== No file generation (outputType=0) ===")
 		default:
 			fmt.Printf("Invalid outputType: %d (0=none, 1=CPP header, 2=JSON meta info)\n", outputType)
