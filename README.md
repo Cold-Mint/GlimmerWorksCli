@@ -14,36 +14,42 @@ go build -o gwc
 gwc updeps
 ```
 
-### 代码生成器可用的注解。
+### Annotations Available for Code Generator
 
-所有的注解仅在生成c++代码时可用。
+All annotations are only valid when generating C++ code.
 
 ```
 //@genCode
 ```
 
-必须放在第一行定义。代码生成器扫描到这个注释后，才会遍历文件行。
+MUST be defined on the first line. The code generator will start traversing file lines only after scanning this comment.
+plaintext
 
 ```
-//@genNextLine(shape|碰撞形状)
+//@genNextLine(shape|collision shape)
 ```
 
-让代码生成器自动分析下一行代码。
+Instructs the code generator to automatically parse the next line of code.
+plaintext
 
 ```
 //@namespace(box2d)
 ```
-定义命名空间。默认情况下代码生成器会从namespace语句内解析，无需显式指定。
+
+Defines a namespace. By default, the code generator parses namespaces from namespace statements, so explicit specification is not required.
+plaintext
 
 ```
 //@include(filePath)
 ```
-将位于filePath的头文件，写入到输出文件内。
+
+Writes the header file at filePath into the output file.
+plaintext
 
 ```
 //@content
-//【内容】
+// [Content]
 //@endContent
 ```
-将内容注入到body部分，写入到输出文件内。
 
+Injects the content into the body section and writes it to the output file.
