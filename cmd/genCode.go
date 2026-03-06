@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -16,39 +17,43 @@ import (
 
 var (
 	// 匹配类/结构体定义行（优先处理）
-	// 支持：struct Resource { / struct StringResource : Resource { / class ResourceRefArg {
 	classStructDefRegex = regexp.MustCompile(`^(class|struct)\s+([a-zA-Z0-9_]+)\s*(?::\s*[a-zA-Z0-9_\s]+)?\{`)
-	// 提取继承关系：struct A : B { → 子类A，父类B（忽略public/private/protected）
+	// 提取继承关系
 	inheritanceExtractRegex = regexp.MustCompile(`^(class|struct)\s+([a-zA-Z0-9_]+)\s*:\s*(?:public|private|protected)?\s*([a-zA-Z0-9_]+)\s*\{`)
-	// 匹配//@genNextLine(注解内容)，提取括号内的全部内容（支持|分隔的中英文）
+	// 匹配//@genNextLine注解
 	genNextLineNoteRegex = regexp.MustCompile(`^//@genNextLine\((.+)\)$`)
-	// 新增：解析//@namespace(xxx)注解
+	// 解析//@namespace注解
 	namespaceAnnotationRegex = regexp.MustCompile(`^//@namespace\((.+)\)$`)
-	// 新增：解析namespace xxx { 代码行
+	// 解析namespace代码行
 	namespaceCodeRegex = regexp.MustCompile(`^namespace\s+([a-zA-Z0-9_]+)\s*\{`)
-	// 匹配//@include(filePath)注解
+	// 匹配//@include注解
 	includeAnnotationRegex = regexp.MustCompile(`^//@include\((.+)\)$`)
-	// 匹配//@content开始标记
-	contentStartRegex = regexp.MustCompile(`^//@content$`)
+	// 匹配//@content(index)开始标记（强制数字索引）
+	contentStartRegex = regexp.MustCompile(`^//@content\((\d+)\)$`)
 	// 匹配//@endContent结束标记
 	contentEndRegex = regexp.MustCompile(`^//@endContent$`)
-	fieldRegex      = regexp.MustCompile(`^((?:[a-zA-Z0-9_:]+)(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
+	// 字段匹配正则
+	fieldRegex = regexp.MustCompile(`^((?:[a-zA-Z0-9_:]+)(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
 )
+
+// 带索引的内容块结构体（全局排序用）
+type IndexedContentBlock struct {
+	Index   int    // 排序索引
+	Content string // 内容
+}
 
 // parseClassInfo 解析类/结构体定义行，返回类名和父类名
 func parseClassInfo(line string) (className, parentClassName string) {
-	// 先提取继承关系
 	if inheritMatches := inheritanceExtractRegex.FindStringSubmatch(line); inheritMatches != nil {
 		return inheritMatches[2], inheritMatches[3]
 	}
-	// 无继承的基础定义
 	if classMatches := classStructDefRegex.FindStringSubmatch(line); classMatches != nil {
 		return classMatches[2], ""
 	}
 	return "", ""
 }
 
-// parseGenNextLineNote 解析//@genNextLine标记行，提取括号内的注解内容
+// parseGenNextLineNote 解析//@genNextLine标记行，提取注解内容
 func parseGenNextLineNote(line string) string {
 	matches := genNextLineNoteRegex.FindStringSubmatch(line)
 	if len(matches) >= 2 {
@@ -57,39 +62,36 @@ func parseGenNextLineNote(line string) string {
 	return ""
 }
 
-// removeLineComments 移除内容中每行开头的//注释符号（保留空行和非//开头的内容）
+// removeLineComments 移除内容中每行开头的//注释符号
 func removeLineComments(content string) string {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	var result strings.Builder
-	// 匹配行首//的正则（支持//前有空格）
 	commentRegex := regexp.MustCompile(`^\s*//`)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		// 移除行首的//（含前置空格）
 		cleanLine := commentRegex.ReplaceAllString(line, "")
-		// 写入处理后的行（保留换行）
 		result.WriteString(cleanLine + "\n")
 	}
 
-	// 处理扫描错误
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("Warning: failed to scan content for comment removal: %v\n", err)
-		return content // 出错时返回原内容
+		return content
 	}
 
 	return result.String()
 }
 
-func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]meta.FieldMeta, extraMeta *meta.FileExtraMeta) error {
+// 修改：返回当前文件的带索引内容块（而非直接写入extraMeta）
+func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]meta.FieldMeta, extraMeta *meta.FileExtraMeta) ([]IndexedContentBlock, error) {
 	relativePath, err := filepath.Rel(outPutFilePath, filePath)
 	if err != nil {
 		fmt.Printf("Failed to get relative path for %s: %v\n", filePath, err)
-		return err
+		return nil, err
 	}
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("open file failed: %v", err)
+		return nil, fmt.Errorf("open file failed: %v", err)
 	}
 	defer file.Close()
 
@@ -99,19 +101,22 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		lines = append(lines, strings.TrimSpace(scanner.Text()))
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read file failed: %v", err)
+		return nil, fmt.Errorf("read file failed: %v", err)
 	}
 
-	// 恢复：检查首行是否为//@genCode，非目标文件直接返回
 	if len(lines) == 0 || lines[0] != "//@genCode" {
-		return nil
+		return nil, nil
 	}
-	var inContentBlock bool // 标记是否在//@content块内
+
+	var inContentBlock bool
 	var currentContent string
+	var currentContentIndex int
+	var fileContentBlocks []IndexedContentBlock // 当前文件的带索引内容块
+
 	for _, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 
-		// 解析//@include(filePath)
+		// 解析//@include注解
 		if matches := includeAnnotationRegex.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
 			incPath := strings.TrimSpace(matches[1])
 			if incPath != "" {
@@ -120,10 +125,17 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			continue
 		}
 
-		// 解析//@content开始标记
-		if contentStartRegex.MatchString(trimmedLine) {
+		// 解析//@content(index)开始标记
+		if matches := contentStartRegex.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
+			indexStr := matches[1]
+			index, err := strconv.Atoi(indexStr)
+			if err != nil {
+				fmt.Printf("Invalid content index '%s' in file %s: %v\n", indexStr, filePath, err)
+				continue
+			}
 			inContentBlock = true
 			currentContent = ""
+			currentContentIndex = index
 			continue
 		}
 
@@ -133,7 +145,10 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			trimmedContent := strings.TrimSpace(currentContent)
 			if trimmedContent != "" {
 				cleanContent := removeLineComments(currentContent)
-				extraMeta.ContentBlocks = append(extraMeta.ContentBlocks, cleanContent)
+				fileContentBlocks = append(fileContentBlocks, IndexedContentBlock{
+					Index:   currentContentIndex,
+					Content: cleanContent,
+				})
 			}
 			continue
 		}
@@ -144,6 +159,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		}
 	}
 
+	// 解析类和字段逻辑（无修改）
 	var classList []meta.ClassInfo
 	currentClass := meta.ClassInfo{}
 	braceCount := 0
@@ -173,6 +189,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			}
 		}
 	}
+
 	var namespaceMarks []meta.NamespaceMark
 	var currentFileNamespace string
 	for lineIdx, line := range lines {
@@ -201,6 +218,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			continue
 		}
 	}
+
 	for lineIdx, line := range lines {
 		if !strings.HasPrefix(line, "//@genNextLine(") {
 			continue
@@ -221,6 +239,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			fmt.Printf("Line %d: invalid field format: %s\n", fieldLineIdx+1, fieldLine)
 			continue
 		}
+
 		var currentClassName, currentParentName string
 		for _, ci := range classList {
 			if fieldLineIdx >= ci.StartLineIdx && fieldLineIdx <= ci.EndLineIdx {
@@ -229,6 +248,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 				break
 			}
 		}
+
 		var currentNamespace string
 		for _, nm := range namespaceMarks {
 			if nm.LineIdx < fieldLineIdx {
@@ -240,6 +260,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		if currentNamespace == "" {
 			currentNamespace = currentFileNamespace
 		}
+
 		fieldType := strings.TrimSpace(fieldMatches[1])
 		if !strings.Contains(fieldType, "::") {
 			switch fieldType {
@@ -256,6 +277,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			}
 			fieldType = "std::vector<" + innerType + ">"
 		}
+
 		fieldName := strings.TrimSpace(fieldMatches[2])
 		fieldDefault := strings.TrimSpace(fieldMatches[4])
 		if currentClassName != "" && !strings.Contains(currentClassName, "::") {
@@ -264,6 +286,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		if currentParentName != "" && !strings.Contains(currentParentName, "::") {
 			currentParentName = currentNamespace + currentParentName
 		}
+
 		*fieldMetas = append(*fieldMetas, meta.FieldMeta{
 			RelativePath:    relativePath,
 			ClassName:       currentClassName,
@@ -274,10 +297,12 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			Note:            note,
 		})
 	}
-	return nil
+
+	// 返回当前文件的带索引内容块
+	return fileContentBlocks, nil
 }
 
-// generateCPPHeaderFile 生成匹配示例格式的C++头文件
+// generateCPPHeaderFile 生成C++头文件（内容块已全局排序）
 func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, includePaths []string, contentBlocks []string) error {
 	var headerContent strings.Builder
 	headerContent.WriteString("// Auto-generated by GlimmerWorksCli\n")
@@ -320,16 +345,18 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 	depsMap := extractClassDependencies(classFields)
 	sortedClasses := topologicalSort(depsMap)
 	inheritanceMap := buildClassInheritance(classFields, fieldMetas)
+
 	bodyContent.WriteString("namespace toml {\n\n")
-	// 注入//@content的内容块
+	// 注入全局排序后的内容块
 	if len(contentBlocks) > 0 {
-		bodyContent.WriteString("// Injected by //@content annotations\n")
+		bodyContent.WriteString("// Injected by //@content annotations (globally sorted by index)\n")
 		for _, content := range contentBlocks {
 			bodyContent.WriteString(content)
 			bodyContent.WriteString("\n")
 		}
 		bodyContent.WriteString("\n")
 	}
+
 	for _, className := range sortedClasses {
 		allFields := collectAllFields(className, classFields, inheritanceMap)
 		bodyContent.WriteString("    template<>\n")
@@ -342,6 +369,7 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		bodyContent.WriteString("            ")
 		bodyContent.WriteString(className)
 		bodyContent.WriteString(" r;\n")
+
 		for _, fm := range allFields {
 			bodyContent.WriteString("            r.")
 			bodyContent.WriteString(fm.Name)
@@ -370,15 +398,16 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 				}
 				bodyContent.WriteString("\n")
 			}
-
 		}
 
 		bodyContent.WriteString("            return r;\n")
 		bodyContent.WriteString("        }\n")
 		bodyContent.WriteString("    };\n\n")
 	}
+
 	bodyContent.WriteString("}\n")
 	headerContent.WriteString(bodyContent.String())
+
 	filePath := filepath.Join(outPutFilePath, "TomlUtils.h")
 	file, err := os.Create(filePath)
 	if err != nil {
@@ -395,7 +424,7 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 	return nil
 }
 
-// buildClassInheritance 构建类的继承层级（子类→父类映射）
+// buildClassInheritance 构建类的继承层级
 func buildClassInheritance(classFields map[string][]meta.FieldMeta, fieldMetas []meta.FieldMeta) map[string]string {
 	inheritanceMap := make(map[string]string)
 	classParent := make(map[string]string)
@@ -415,11 +444,10 @@ func buildClassInheritance(classFields map[string][]meta.FieldMeta, fieldMetas [
 			inheritanceMap[className] = parent
 		}
 	}
-
 	return inheritanceMap
 }
 
-// collectAllFields 递归收集类的所有字段（父类+子类）
+// collectAllFields 递归收集类的所有字段
 func collectAllFields(className string, classFields map[string][]meta.FieldMeta, inheritanceMap map[string]string) []meta.FieldMeta {
 	var allFields []meta.FieldMeta
 	if parent, exists := inheritanceMap[className]; exists {
@@ -438,7 +466,6 @@ func collectAllFields(className string, classFields map[string][]meta.FieldMeta,
 			fieldNameSet[f.Name] = true
 		}
 	}
-
 	return allFields
 }
 
@@ -462,7 +489,7 @@ func generateJSONFile(outputPath string, fieldMetas []meta.FieldMeta) error {
 	return nil
 }
 
-// extractClassDependencies 提取所有类的依赖关系
+// extractClassDependencies 提取类依赖关系
 func extractClassDependencies(classFields map[string][]meta.FieldMeta) map[string]meta.ClassDependency {
 	depsMap := make(map[string]meta.ClassDependency)
 	basicTypeRegex := regexp.MustCompile(`^(bool|int|uint8_t|uint32_t|uint64_t|float|size_t|std::string|std::vector<.+>)$`)
@@ -471,6 +498,7 @@ func extractClassDependencies(classFields map[string][]meta.FieldMeta) map[strin
 	for className := range classFields {
 		allClasses[className] = true
 	}
+
 	for className, fields := range classFields {
 		deps := make(map[string]bool)
 		for _, fm := range fields {
@@ -497,7 +525,7 @@ func extractClassDependencies(classFields map[string][]meta.FieldMeta) map[strin
 	return depsMap
 }
 
-// topologicalSort 对类进行拓扑排序（被依赖的类优先）
+// topologicalSort 拓扑排序类
 func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 	inDegree := make(map[string]int)
 	adj := make(map[string][]string)
@@ -505,18 +533,21 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 		inDegree[className] = 0
 		adj[className] = []string{}
 	}
+
 	for className, dep := range depsMap {
 		for _, d := range dep.Deps {
 			adj[d] = append(adj[d], className)
 			inDegree[className]++
 		}
 	}
+
 	var queue []string
 	for className, degree := range inDegree {
 		if degree == 0 {
 			queue = append(queue, className)
 		}
 	}
+
 	var sortedClasses []string
 	for len(queue) > 0 {
 		current := queue[0]
@@ -529,6 +560,7 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 			}
 		}
 	}
+
 	if len(sortedClasses) != len(depsMap) {
 		sortedClasses = make([]string, 0, len(depsMap))
 		for className := range depsMap {
@@ -536,15 +568,14 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 		}
 		sort.Strings(sortedClasses)
 	}
-
 	return sortedClasses
 }
 
-// genCodeCmd 优化输出格式，新增文件生成功能
+// genCodeCmd 主命令
 var genCodeCmd = &cobra.Command{
 	Use:   "genCode",
 	Short: "Parse C++ files with //@genCode annotation and generate FieldMeta",
-	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info (type/name/default/note) and output FieldMeta/C++ Header/JSON files.`,
+	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info and output FieldMeta/C++ Header/JSON files.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		dir, err := os.Getwd()
 		if err != nil {
@@ -565,7 +596,9 @@ var genCodeCmd = &cobra.Command{
 
 		var fieldMetas []meta.FieldMeta
 		var allIncludePaths []string
-		var allContentBlocks []string
+		var allIndexedContentBlocks []IndexedContentBlock // 全局带索引内容块
+
+		// 遍历目录处理文件
 		err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				fmt.Printf("access file failed: %v\n", err)
@@ -577,11 +610,16 @@ var genCodeCmd = &cobra.Command{
 			if !strings.HasSuffix(path, ".h") && !strings.HasSuffix(path, ".cpp") {
 				return nil
 			}
+
 			var extraMeta meta.FileExtraMeta
-			if err := processGenCodeFile(outputPath, path, &fieldMetas, &extraMeta); err != nil {
+			// 处理文件，获取当前文件的带索引内容块
+			fileContentBlocks, err := processGenCodeFile(outputPath, path, &fieldMetas, &extraMeta)
+			if err != nil {
 				fmt.Printf("process file %s failed: %v\n", path, err)
 				return err
 			}
+
+			// 收集include路径（去重）
 			includeSet := make(map[string]struct{})
 			for _, path := range extraMeta.IncludePaths {
 				if path != "" {
@@ -591,16 +629,10 @@ var genCodeCmd = &cobra.Command{
 			for path := range includeSet {
 				allIncludePaths = append(allIncludePaths, path)
 			}
-			contentSet := make(map[string]struct{})
-			for _, content := range extraMeta.ContentBlocks {
-				trimmed := strings.TrimSpace(content)
-				if trimmed != "" {
-					contentSet[content] = struct{}{}
-				}
-			}
-			for content := range contentSet {
-				allContentBlocks = append(allContentBlocks, content)
-			}
+
+			// 收集当前文件的带索引内容块到全局列表
+			allIndexedContentBlocks = append(allIndexedContentBlocks, fileContentBlocks...)
+
 			return nil
 		})
 
@@ -608,6 +640,24 @@ var genCodeCmd = &cobra.Command{
 			fmt.Printf("walk dir failed: %v\n", err)
 			return
 		}
+
+		// 关键修复：全局按索引排序所有内容块
+		sort.Slice(allIndexedContentBlocks, func(i, j int) bool {
+			return allIndexedContentBlocks[i].Index < allIndexedContentBlocks[j].Index
+		})
+
+		// 修复：转换为字符串切片（去重） - 修正map使用错误
+		var allContentBlocks []string
+		contentSet := make(map[string]bool) // 改为bool类型的map
+		for _, block := range allIndexedContentBlocks {
+			trimmed := strings.TrimSpace(block.Content)
+			if trimmed != "" && !contentSet[trimmed] { // 正确判断是否存在
+				allContentBlocks = append(allContentBlocks, block.Content)
+				contentSet[trimmed] = true // 正确赋值bool类型
+			}
+		}
+
+		// 输出FieldMeta信息
 		fmt.Println("=== All FieldMeta Information ===")
 		if len(fieldMetas) == 0 {
 			fmt.Println("No FieldMeta found.")
@@ -624,6 +674,8 @@ var genCodeCmd = &cobra.Command{
 					i+1, fm.RelativePath, fm.ClassName, parent, fm.Type, fm.Name, fm.Default, fm.Note)
 			}
 		}
+
+		// 生成文件
 		switch outputType {
 		case 1:
 			if err := generateCPPHeaderFile(outputPath, fieldMetas, allIncludePaths, allContentBlocks); err != nil {
@@ -647,8 +699,6 @@ var genCodeCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(genCodeCmd)
-	// 文件输出路径，如果为空，那么设置为os.Getwd()
 	genCodeCmd.Flags().StringP("outputPath", "o", "", "File output path (default: current directory)")
-	// 0为不输出，1为输出cpp头文件，2为输出json文件。默认0
-	genCodeCmd.Flags().Int8P("outputType", "t", 0, "Output type (0=none, 1=CPP header (TomlUtils.h), 2=JSON meta info)")
+	genCodeCmd.Flags().Int8P("outputType", "t", 0, "Output type (0=none, 1=CPP header, 2=JSON meta info)")
 }

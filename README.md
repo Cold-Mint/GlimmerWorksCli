@@ -47,9 +47,10 @@ Writes the header file at filePath into the output file.
 plaintext
 
 ```
-//@content
+//@content(index)
 // [Content]
 //@endContent
 ```
 
 Injects the content into the body section and writes it to the output file.
+The indices will be arranged in ascending order within the generated file.
