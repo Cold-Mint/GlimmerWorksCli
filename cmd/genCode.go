@@ -57,6 +57,30 @@ func parseGenNextLineNote(line string) string {
 	return ""
 }
 
+// removeLineComments 移除内容中每行开头的//注释符号（保留空行和非//开头的内容）
+func removeLineComments(content string) string {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	var result strings.Builder
+	// 匹配行首//的正则（支持//前有空格）
+	commentRegex := regexp.MustCompile(`^\s*//`)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		// 移除行首的//（含前置空格）
+		cleanLine := commentRegex.ReplaceAllString(line, "")
+		// 写入处理后的行（保留换行）
+		result.WriteString(cleanLine + "\n")
+	}
+
+	// 处理扫描错误
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Warning: failed to scan content for comment removal: %v\n", err)
+		return content // 出错时返回原内容
+	}
+
+	return result.String()
+}
+
 func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]meta.FieldMeta, extraMeta *meta.FileExtraMeta) error {
 	relativePath, err := filepath.Rel(outPutFilePath, filePath)
 	if err != nil {
@@ -107,8 +131,9 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		if contentEndRegex.MatchString(trimmedLine) {
 			inContentBlock = false
 			trimmedContent := strings.TrimSpace(currentContent)
-			if trimmedContent != "" { // 仅保留非空内容
-				extraMeta.ContentBlocks = append(extraMeta.ContentBlocks, currentContent)
+			if trimmedContent != "" {
+				cleanContent := removeLineComments(currentContent)
+				extraMeta.ContentBlocks = append(extraMeta.ContentBlocks, cleanContent)
 			}
 			continue
 		}
@@ -283,15 +308,6 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		headerContent.WriteString("\n")
 	}
 
-	// 注入//@content的内容块
-	if len(contentBlocks) > 0 {
-		headerContent.WriteString("// Injected by //@content annotations\n")
-		for _, content := range contentBlocks {
-			headerContent.WriteString(content)
-			headerContent.WriteString("\n")
-		}
-		headerContent.WriteString("\n")
-	}
 	var bodyContent strings.Builder
 	classFields := make(map[string][]meta.FieldMeta)
 	for _, fm := range fieldMetas {
@@ -305,6 +321,15 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 	sortedClasses := topologicalSort(depsMap)
 	inheritanceMap := buildClassInheritance(classFields, fieldMetas)
 	bodyContent.WriteString("namespace toml {\n\n")
+	// 注入//@content的内容块
+	if len(contentBlocks) > 0 {
+		bodyContent.WriteString("// Injected by //@content annotations\n")
+		for _, content := range contentBlocks {
+			bodyContent.WriteString(content)
+			bodyContent.WriteString("\n")
+		}
+		bodyContent.WriteString("\n")
+	}
 	for _, className := range sortedClasses {
 		allFields := collectAllFields(className, classFields, inheritanceMap)
 		bodyContent.WriteString("    template<>\n")
