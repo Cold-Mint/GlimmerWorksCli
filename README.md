@@ -35,8 +35,6 @@ gwc updeps
 ```
 定义命名空间。默认情况下代码生成器会从namespace语句内解析，无需显式指定。
 
-## 需要实现的
-
 ```
 //@include(filePath)
 ```
