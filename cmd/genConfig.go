@@ -33,14 +33,8 @@ var (
 	// 匹配//@endContent结束标记
 	contentEndRegex = regexp.MustCompile(`^//@endContent$`)
 	// 字段匹配正则
-	fieldRegex = regexp.MustCompile(`^((?:[a-zA-Z0-9_:]+)(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
+	fieldRegex = regexp.MustCompile(`^([a-zA-Z0-9_:]+(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
 )
-
-// 带索引的内容块结构体（全局排序用）
-type IndexedContentBlock struct {
-	Index   int    // 排序索引
-	Content string // 内容
-}
 
 // parseClassInfo 解析类/结构体定义行，返回类名和父类名
 func parseClassInfo(line string) (className, parentClassName string) {
@@ -83,7 +77,7 @@ func removeLineComments(content string) string {
 }
 
 // 修改：返回当前文件的带索引内容块（而非直接写入extraMeta）
-func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]meta.FieldMeta, extraMeta *meta.FileExtraMeta) ([]IndexedContentBlock, error) {
+func processGenConfigFile(outPutFilePath string, filePath string, fieldMetas *[]meta.FieldMeta, extraMeta *meta.FileExtraMeta) ([]meta.IndexedContentBlock, error) {
 	relativePath, err := filepath.Rel(outPutFilePath, filePath)
 	if err != nil {
 		fmt.Printf("Failed to get relative path for %s: %v\n", filePath, err)
@@ -104,14 +98,14 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		return nil, fmt.Errorf("read file failed: %v", err)
 	}
 
-	if len(lines) == 0 || lines[0] != "//@genCode" {
+	if len(lines) == 0 || lines[0] != "//@genConfig" {
 		return nil, nil
 	}
 
 	var inContentBlock bool
 	var currentContent string
 	var currentContentIndex int
-	var fileContentBlocks []IndexedContentBlock // 当前文件的带索引内容块
+	var fileContentBlocks []meta.IndexedContentBlock
 
 	for _, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
@@ -145,7 +139,7 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 			trimmedContent := strings.TrimSpace(currentContent)
 			if trimmedContent != "" {
 				cleanContent := removeLineComments(currentContent)
-				fileContentBlocks = append(fileContentBlocks, IndexedContentBlock{
+				fileContentBlocks = append(fileContentBlocks, meta.IndexedContentBlock{
 					Index:   currentContentIndex,
 					Content: cleanContent,
 				})
@@ -571,11 +565,11 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 	return sortedClasses
 }
 
-// genCodeCmd 主命令
-var genCodeCmd = &cobra.Command{
-	Use:   "genCode",
-	Short: "Parse C++ files with //@genCode annotation and generate FieldMeta",
-	Long:  `Parse all .cpp/.h files with //@genCode annotation, extract class/struct field info and output FieldMeta/C++ Header/JSON files.`,
+// genConfigCmd 主命令
+var genConfigCmd = &cobra.Command{
+	Use:   "genConfig",
+	Short: "Parse C++ files with //@genConfig annotation and generate FieldMeta",
+	Long:  `Parse all .cpp/.h files with //@genConfig annotation, extract class/struct field info and output FieldMeta/C++ Header/JSON files.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		dir, err := os.Getwd()
 		if err != nil {
@@ -596,7 +590,7 @@ var genCodeCmd = &cobra.Command{
 
 		var fieldMetas []meta.FieldMeta
 		var allIncludePaths []string
-		var allIndexedContentBlocks []IndexedContentBlock // 全局带索引内容块
+		var allIndexedContentBlocks []meta.IndexedContentBlock // 全局带索引内容块
 
 		// 遍历目录处理文件
 		err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -613,7 +607,7 @@ var genCodeCmd = &cobra.Command{
 
 			var extraMeta meta.FileExtraMeta
 			// 处理文件，获取当前文件的带索引内容块
-			fileContentBlocks, err := processGenCodeFile(outputPath, path, &fieldMetas, &extraMeta)
+			fileContentBlocks, err := processGenConfigFile(outputPath, path, &fieldMetas, &extraMeta)
 			if err != nil {
 				fmt.Printf("process file %s failed: %v\n", path, err)
 				return err
@@ -698,7 +692,7 @@ var genCodeCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(genCodeCmd)
-	genCodeCmd.Flags().StringP("outputPath", "o", "", "File output path (default: current directory)")
-	genCodeCmd.Flags().Int8P("outputType", "t", 0, "Output type (0=none, 1=CPP header, 2=JSON meta info)")
+	rootCmd.AddCommand(genConfigCmd)
+	genConfigCmd.Flags().StringP("outputPath", "o", "", "File output path (default: current directory)")
+	genConfigCmd.Flags().Int8P("outputType", "t", 0, "Output type (0=none, 1=CPP header, 2=JSON meta info)")
 }
