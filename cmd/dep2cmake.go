@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,16 +20,22 @@ import (
 type FoundLib struct {
 	SymLinkPath string // 软链接绝对路径
 	RealPath    string // 真实文件绝对路径
-	SymRelPath  string // 软链接相对路径（输出用）
-	RealRelPath string // 真实文件相对路径（输出用）
+	SymRelPath  string // 软链接相对路径
+	RealRelPath string // 真实文件相对路径
 	IsSymlink   bool   // 是否为软链接
 }
+
+// 正则匹配库文件版本号 (例如 .so.1.2.3)
+var versionRegex = regexp.MustCompile(`(\.\d+)+$`)
+
+// 正则匹配库后缀 (.so, .dll, .dylib)
+var suffixRegex = regexp.MustCompile(`\.(so|dll|dylib)`)
 
 // dep2cmakeCmd represents the dep2cmake command
 var dep2cmakeCmd = &cobra.Command{
 	Use:   "dep2cmake",
-	Short: "Find missing library paths via ldd and output relative paths",
-	Long:  `Analyze executable dependencies with ldd, find missing libraries in build directory, resolve symlinks and output relative paths`,
+	Short: "Find missing library paths via ldd and output CMake install code",
+	Long:  "Analyze executable dependencies with ldd, find missing libraries, resolve symlinks and generate CMake install commands",
 	Run: func(cmd *cobra.Command, args []string) {
 		// 获取当前工作目录（用于计算相对路径）
 		currentDir, err := os.Getwd()
@@ -102,9 +109,7 @@ var dep2cmakeCmd = &cobra.Command{
 				return nil
 			}
 
-			// ==============================================
-			// 核心修复：严格区分软链接和真实文件路径
-			// ==============================================
+			// 核心：严格区分软链接和真实文件路径
 			var symLinkAbs, realAbs string
 			isSymlink := false
 
@@ -120,7 +125,7 @@ var dep2cmakeCmd = &cobra.Command{
 					realAbs, _ = filepath.Abs(realPath)
 				}
 			} else {
-				// 普通文件：软链接路径=真实路径
+				// 普通文件
 				isSymlink = false
 				symLinkAbs, _ = filepath.Abs(path)
 				realAbs = symLinkAbs
@@ -151,11 +156,10 @@ var dep2cmakeCmd = &cobra.Command{
 		foundCount := len(foundLibs)
 		stillMissingCount := totalMissing - foundCount
 
-		// 输出结果
+		// 输出库路径结果
 		fmt.Println("\n=====================================")
-		fmt.Println("📦 Found Missing Dependent Libraries (Relative Paths)")
+		fmt.Println("📦 Found Missing Dependent Libraries")
 		fmt.Println("=====================================")
-
 		if foundCount == 0 {
 			fmt.Println("❌ No missing dependent libraries found in the build directory")
 		} else {
@@ -163,9 +167,6 @@ var dep2cmakeCmd = &cobra.Command{
 				if !lib.IsSymlink {
 					fmt.Printf("Library: %s\n", lib.RealRelPath)
 				} else {
-					// ==============================================
-					// 核心修复：分别打印软链接和真实文件的相对路径
-					// ==============================================
 					fmt.Printf("Symlink: %s\nReal File: %s\n", lib.SymRelPath, lib.RealRelPath)
 				}
 				fmt.Println("-------------------------------------")
@@ -180,10 +181,89 @@ var dep2cmakeCmd = &cobra.Command{
 		fmt.Printf("Libraries found:          %d\n", foundCount)
 		fmt.Printf("Libraries still missing:  %d\n", stillMissingCount)
 		fmt.Println("=====================================\n")
+
+		// ===================== 生成标准CMake Install代码 =====================
+		if foundCount > 0 {
+			generateCMakeInstallCode(foundLibs)
+		}
 	},
 }
 
-// getMissingDependencies 执行ldd命令，解析缺失的库
+// generateCMakeInstallCode 生成标准CMake install(FILES) 代码
+func generateCMakeInstallCode(libs []FoundLib) {
+	fmt.Println("=====================================")
+	fmt.Println("🔧 AUTO-GENERATED CMAKE INSTALL CODE")
+	fmt.Println("=====================================")
+	fmt.Println("# ==== CROSS-PLATFORM LIBRARY SUFFIX ====")
+	fmt.Println("if(WIN32)")
+	fmt.Println("    set(LIB_SUFFIX dll)")
+	fmt.Println("elseif(APPLE)")
+	fmt.Println("    set(LIB_SUFFIX dylib)")
+	fmt.Println("else()")
+	fmt.Println("    set(LIB_SUFFIX so)")
+	fmt.Println("endif()")
+	fmt.Println()
+	fmt.Println("# ==== AUTO-GENERATED INSTALL COMMANDS ====")
+	fmt.Println()
+
+	for _, lib := range libs {
+		if lib.IsSymlink {
+			// 软链接：安装 软链接 + 真实文件
+			generateInstallCmd(lib.SymRelPath, lib.RealRelPath, true)
+		} else {
+			// 普通文件
+			generateInstallCmd(lib.RealRelPath, "", false)
+		}
+		fmt.Println()
+	}
+}
+
+// generateInstallCmd 生成单条/两条 install(FILES) 命令
+func generateInstallCmd(relPath string, realRelPath string, isSymlink bool) {
+	// 路径转换 + 替换库后缀
+	cmakePath := convertToCMakePath(relPath)
+	cmakePath = suffixRegex.ReplaceAllString(cmakePath, ".${LIB_SUFFIX}")
+	fullPath := cmakePath
+	basePath := removeVersionSuffix(cmakePath)
+
+	// 软链接处理第二个文件
+	var realFullPath string
+	if isSymlink {
+		realCmakePath := convertToCMakePath(realRelPath)
+		realCmakePath = suffixRegex.ReplaceAllString(realCmakePath, ".${LIB_SUFFIX}")
+		realFullPath = realCmakePath
+	}
+
+	// 生成标准 CMake install 命令
+	fmt.Println("if (WIN32)")
+	fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", basePath)
+	fmt.Println("else ()")
+	if isSymlink {
+		// 软链接：安装两个文件
+		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", fullPath)
+		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", realFullPath)
+	} else {
+		// 普通文件：安装带版本的库
+		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", fullPath)
+	}
+	fmt.Println("endif ()")
+}
+
+// convertToCMakePath 路径转换：第一个目录替换为 ${CMAKE_BINARY_DIR}
+func convertToCMakePath(relPath string) string {
+	idx := strings.Index(relPath, "/")
+	if idx == -1 {
+		return "${CMAKE_BINARY_DIR}/" + relPath
+	}
+	return "${CMAKE_BINARY_DIR}/" + relPath[idx+1:]
+}
+
+// removeVersionSuffix 移除版本号后缀
+func removeVersionSuffix(path string) string {
+	return versionRegex.ReplaceAllString(path, "")
+}
+
+// getMissingDependencies 执行ldd解析缺失依赖
 func getMissingDependencies(execFile string) (map[string]struct{}, error) {
 	cmd := exec.Command("ldd", execFile)
 	stdout, err := cmd.StdoutPipe()
@@ -223,7 +303,7 @@ func getMissingDependencies(execFile string) (map[string]struct{}, error) {
 func init() {
 	rootCmd.AddCommand(dep2cmakeCmd)
 	dep2cmakeCmd.PersistentFlags().StringP("buildPath", "b", "", "Build output root directory (required)")
-	dep2cmakeCmd.PersistentFlags().StringP("executableFile", "e", "", "Path to executable file for analysis (required)")
+	dep2cmakeCmd.PersistentFlags().StringP("executableFile", "e", "", "Path to executable file (required)")
 	_ = dep2cmakeCmd.MarkPersistentFlagRequired("buildPath")
 	_ = dep2cmakeCmd.MarkPersistentFlagRequired("executableFile")
 }
