@@ -280,13 +280,15 @@ func getMissingDependencies(execFile string) (map[string]struct{}, error) {
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.Contains(line, "not found") {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				libName := fields[0]
-				missing[libName] = struct{}{}
-			}
+		//Try to search for all the libraries with the same name.
+		//尝试搜索所有的同名库。
+		//if strings.Contains(line, "not found") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			libName := fields[0]
+			missing[libName] = struct{}{}
 		}
+		//}
 	}
 
 	if err := scanner.Err(); err != nil {
