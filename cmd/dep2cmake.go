@@ -25,11 +25,8 @@ type FoundLib struct {
 	IsSymlink   bool   // 是否为软链接
 }
 
-// 正则匹配库文件版本号 (例如 .so.1.2.3)
-var versionRegex = regexp.MustCompile(`(\.\d+)+$`)
-
-// 正则匹配库后缀 (.so, .dll, .dylib)
-var suffixRegex = regexp.MustCompile(`\.(so|dll|dylib)`)
+// 正则：精准匹配 纯库名 + 库后缀 + 版本号（修复核心：分组捕获）
+var libPattern = regexp.MustCompile(`^(.*?)\.(so|dll|dylib)((\.\d+)*)$`)
 
 // dep2cmakeCmd represents the dep2cmake command
 var dep2cmakeCmd = &cobra.Command{
@@ -37,7 +34,7 @@ var dep2cmakeCmd = &cobra.Command{
 	Short: "Find missing library paths via ldd and output CMake install code",
 	Long:  "Analyze executable dependencies with ldd, find missing libraries, resolve symlinks and generate CMake install commands",
 	Run: func(cmd *cobra.Command, args []string) {
-		// 获取当前工作目录（用于计算相对路径）
+		// 获取当前工作目录
 		currentDir, err := os.Getwd()
 		if err != nil {
 			fmt.Printf("Error: Failed to get current directory: %v\n", err)
@@ -103,21 +100,17 @@ var dep2cmakeCmd = &cobra.Command{
 				return nil
 			}
 
-			// 匹配缺失的库文件
 			fileName := d.Name()
 			if _, exists := missingLibs[fileName]; !exists {
 				return nil
 			}
 
-			// 核心：严格区分软链接和真实文件路径
 			var symLinkAbs, realAbs string
 			isSymlink := false
 
-			// 判断是否为软链接
 			if d.Type()&os.ModeSymlink != 0 {
 				isSymlink = true
 				symLinkAbs, _ = filepath.Abs(path)
-				// 解析软链接指向的真实文件
 				realPath, err := filepath.EvalSymlinks(path)
 				if err != nil {
 					realAbs = symLinkAbs
@@ -125,17 +118,14 @@ var dep2cmakeCmd = &cobra.Command{
 					realAbs, _ = filepath.Abs(realPath)
 				}
 			} else {
-				// 普通文件
 				isSymlink = false
 				symLinkAbs, _ = filepath.Abs(path)
 				realAbs = symLinkAbs
 			}
 
-			// 计算相对路径
 			symRel, _ := filepath.Rel(currentDir, symLinkAbs)
 			realRel, _ := filepath.Rel(currentDir, realAbs)
 
-			// 添加到结果集
 			foundLibs = append(foundLibs, FoundLib{
 				SymLinkPath: symLinkAbs,
 				RealPath:    realAbs,
@@ -182,14 +172,14 @@ var dep2cmakeCmd = &cobra.Command{
 		fmt.Printf("Libraries still missing:  %d\n", stillMissingCount)
 		fmt.Println("=====================================\n")
 
-		// ===================== 生成标准CMake Install代码 =====================
+		// 生成CMake代码
 		if foundCount > 0 {
 			generateCMakeInstallCode(foundLibs)
 		}
 	},
 }
 
-// generateCMakeInstallCode 生成标准CMake install(FILES) 代码
+// generateCMakeInstallCode 生成标准CMake install代码
 func generateCMakeInstallCode(libs []FoundLib) {
 	fmt.Println("=====================================")
 	fmt.Println("🔧 AUTO-GENERATED CMAKE INSTALL CODE")
@@ -208,59 +198,69 @@ func generateCMakeInstallCode(libs []FoundLib) {
 
 	for _, lib := range libs {
 		if lib.IsSymlink {
-			// 软链接：安装 软链接 + 真实文件
 			generateInstallCmd(lib.SymRelPath, lib.RealRelPath, true)
 		} else {
-			// 普通文件
 			generateInstallCmd(lib.RealRelPath, "", false)
 		}
 		fmt.Println()
 	}
 }
 
-// generateInstallCmd 生成单条/两条 install(FILES) 命令
+// 【修复完成】核心函数：统一基于纯库名拼接路径，彻底解决双点/缺失后缀问题
 func generateInstallCmd(relPath string, realRelPath string, isSymlink bool) {
-	// 路径转换 + 替换库后缀
-	cmakePath := convertToCMakePath(relPath)
-	cmakePath = suffixRegex.ReplaceAllString(cmakePath, ".${LIB_SUFFIX}")
-	fullPath := cmakePath
-	basePath := removeVersionSuffix(cmakePath)
+	cmakeBasePath := convertToCMakePath(relPath)
 
-	// 软链接处理第二个文件
-	var realFullPath string
-	if isSymlink {
-		realCmakePath := convertToCMakePath(realRelPath)
-		realCmakePath = suffixRegex.ReplaceAllString(realCmakePath, ".${LIB_SUFFIX}")
-		realFullPath = realCmakePath
+	// 分组捕获：纯库名、版本号（修复核心）
+	matches := libPattern.FindStringSubmatch(cmakeBasePath)
+	var pureLibName, versionPart string
+	if len(matches) >= 4 {
+		pureLibName = matches[1]
+		versionPart = matches[3]
+	} else {
+		// 降级兼容处理
+		pureLibName = libPattern.ReplaceAllString(cmakeBasePath, "")
+		versionPart = ""
 	}
 
-	// 生成标准 CMake install 命令
+	// 生成跨平台路径（无错误、无双点）
+	windowsPath := fmt.Sprintf("%s.${LIB_SUFFIX}", pureLibName)
+	linuxPath := fmt.Sprintf("%s.${LIB_SUFFIX}%s", pureLibName, versionPart)
+
+	// 软链接：真实文件路径同步修复
+	var linuxRealPath string
+	if isSymlink {
+		realCmakePath := convertToCMakePath(realRelPath)
+		realMatches := libPattern.FindStringSubmatch(realCmakePath)
+		var realPureName, realVersion string
+		if len(realMatches) >= 4 {
+			realPureName = realMatches[1]
+			realVersion = realMatches[3]
+		} else {
+			realPureName = libPattern.ReplaceAllString(realCmakePath, "")
+			realVersion = ""
+		}
+		linuxRealPath = fmt.Sprintf("%s.${LIB_SUFFIX}%s", realPureName, realVersion)
+	}
+
+	// 输出最终CMake指令
 	fmt.Println("if (WIN32)")
-	fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", basePath)
+	fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", windowsPath)
 	fmt.Println("else ()")
 	if isSymlink {
-		// 软链接：安装两个文件
-		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", fullPath)
-		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", realFullPath)
+		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", linuxPath)
+		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", linuxRealPath)
 	} else {
-		// 普通文件：安装带版本的库
-		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", fullPath)
+		fmt.Printf("    install(FILES \"%s\" DESTINATION ${LIB_DIR})\n", linuxPath)
 	}
 	fmt.Println("endif ()")
 }
 
-// convertToCMakePath 路径转换：第一个目录替换为 ${CMAKE_BINARY_DIR}
 func convertToCMakePath(relPath string) string {
 	idx := strings.Index(relPath, "/")
 	if idx == -1 {
 		return "${CMAKE_BINARY_DIR}/" + relPath
 	}
 	return "${CMAKE_BINARY_DIR}/" + relPath[idx+1:]
-}
-
-// removeVersionSuffix 移除版本号后缀
-func removeVersionSuffix(path string) string {
-	return versionRegex.ReplaceAllString(path, "")
 }
 
 // getMissingDependencies 执行ldd解析缺失依赖
