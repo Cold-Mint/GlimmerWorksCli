@@ -79,8 +79,8 @@ func processSingleTomlFile(filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal TOML")
 	}
-
-	if err := os.WriteFile(filePath, newContent, 0644); err != nil {
+	finalContent := strings.ReplaceAll(string(newContent), "'", "\"")
+	if err := os.WriteFile(filePath, []byte(finalContent), 0644); err != nil {
 		return fmt.Errorf("failed to write file")
 	}
 
