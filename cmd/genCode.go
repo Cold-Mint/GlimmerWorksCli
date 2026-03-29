@@ -36,6 +36,24 @@ var (
 	fieldRegex = regexp.MustCompile(`^([a-zA-Z0-9_:]+(?:<.*>)?)+\s+([a-zA-Z0-9_]+)\s*(=\s*([^;]+))?;`)
 )
 
+func toSnakeCase(s string) string {
+	if s == "" {
+		return ""
+	}
+	var result strings.Builder
+	result.WriteByte(s[0])
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			result.WriteByte('_')
+			result.WriteByte(c + 32)
+		} else {
+			result.WriteByte(c)
+		}
+	}
+	return strings.ToLower(result.String())
+}
+
 // parseClassInfo 解析类/结构体定义行，返回类名和父类名
 func parseClassInfo(line string) (className, parentClassName string) {
 	if inheritMatches := inheritanceExtractRegex.FindStringSubmatch(line); inheritMatches != nil {
@@ -365,6 +383,7 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		bodyContent.WriteString(" r;\n")
 
 		for _, fm := range allFields {
+			snakeName := toSnakeCase(fm.Name)
 			bodyContent.WriteString("            r.")
 			bodyContent.WriteString(fm.Name)
 			if fm.Default == "" {
@@ -372,14 +391,14 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 				bodyContent.WriteString(fm.Type)
 				bodyContent.WriteString(">")
 				bodyContent.WriteString("(v, \"")
-				bodyContent.WriteString(fm.Name)
+				bodyContent.WriteString(snakeName) // TOML key 使用蛇形
 				bodyContent.WriteString("\");\n")
 			} else {
 				bodyContent.WriteString(" = toml::find_or<")
 				bodyContent.WriteString(fm.Type)
 				bodyContent.WriteString(">")
 				bodyContent.WriteString("(v, \"")
-				bodyContent.WriteString(fm.Name)
+				bodyContent.WriteString(snakeName) // TOML key 使用蛇形
 				bodyContent.WriteString("\",")
 				if fm.Type == "std::string" {
 					bodyContent.WriteString("\"")
@@ -657,15 +676,16 @@ var genCodeCmd = &cobra.Command{
 			fmt.Println("No FieldMeta found.")
 		} else {
 			fmt.Printf("%-4s %-30s %-25s %-20s %-30s %-20s %-20s %s\n",
-				"NO", "RelativePath", "Class", "Parent Class", "Type", "Name", "Default", "Note")
+				"NO", "RelativePath", "Class", "Parent Class", "Type", "Name(snake)", "Default", "Note")
 			fmt.Println(strings.Repeat("-", 180))
 			for i, fm := range fieldMetas {
 				parent := fm.ParentClassName
 				if parent == "" {
 					parent = "-"
 				}
+				snakeName := toSnakeCase(fm.Name)
 				fmt.Printf("%-4d %-30s %-25s %-20s %-30s %-20s %-20s %s\n",
-					i+1, fm.RelativePath, fm.ClassName, parent, fm.Type, fm.Name, fm.Default, fm.Note)
+					i+1, fm.RelativePath, fm.ClassName, parent, fm.Type, snakeName, fm.Default, fm.Note)
 			}
 		}
 
