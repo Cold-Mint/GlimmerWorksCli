@@ -14,6 +14,7 @@ import (
 type GitHubRelease struct {
 	TagName    string `json:"tag_name"`
 	Prerelease bool   `json:"prerelease"`
+	Draft      bool   `json:"draft"`
 }
 
 type VariableDefinition struct {
@@ -111,35 +112,27 @@ func repoToVarName(repo string) string {
 
 func GetTheLatestTag(repo string) string {
 	fmt.Println("Get Latest ", repo)
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases", repo)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("Failed to fetch releases:", err)
+		fmt.Println("Failed to fetch latest release:", err)
 		return ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		fmt.Println("GitHub API returned status:", resp.Status)
+		fmt.Printf("GitHub API returned status: %s\n", resp.Status)
 		return ""
 	}
 
-	var releases []GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	var release GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		fmt.Println("Failed to decode JSON:", err)
 		return ""
 	}
 
-	// 找到第一个 prerelease=false 的 release
-	for _, r := range releases {
-		if !r.Prerelease {
-			return r.TagName
-		}
-	}
-
-	fmt.Println("No stable release found")
-	return ""
+	return release.TagName
 }
 
 func init() {
