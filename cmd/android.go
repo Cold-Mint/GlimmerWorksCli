@@ -6,7 +6,6 @@ package cmd
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,14 +20,14 @@ const (
 	androidJniLibsPath = "app/src/main/jniLibs" // so库目标目录
 	androidAssetsPath  = "app/src/main/assets"  // 资源文件目标目录
 	androidLibsPath    = "app/libs"             // aar包目标目录（标准）
-	indexFileName      = "index.json"           // 资源索引文件(JSON)
+	indexFileName      = "index.toml"           // 资源索引文件(TOML)
 )
 
 // 资源索引结构体
 type IndexEntry struct {
-	IsFile bool   `json:"is_file"`
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
+	IsFile bool
+	Path   string
+	SHA256 string
 }
 
 var androidCmd = &cobra.Command{
@@ -91,7 +90,7 @@ func runAndroidCommand(cmd *cobra.Command, args []string) {
 			fmt.Printf("❌ Error: Valid SDL AAR file path (--sdl-aar/-l) must be specified during installation\n")
 			os.Exit(1)
 		}
-		// 🔥 核心修复：递归扫描整个build目录+所有子目录的.so文件
+		// 递归扫描整个build目录+所有子目录的.so文件
 		allSOFiles = scanAllSOFilesRecursive()
 		if len(allSOFiles) == 0 {
 			fmt.Println("❌ Error: No .so files found in build directory and subdirectories")
@@ -177,17 +176,17 @@ func installToAndroid() error {
 		}
 	}
 
-	// 5. 生成资源索引JSON
+	// 5. 生成资源索引TOML
 	fmt.Println("📝 Generating assets index file...")
 	indexPath := filepath.Join(assetsDir, indexFileName)
-	if err := generateIndexJson(assetsDir, indexPath); err != nil {
+	if err := generateIndexToml(assetsDir, indexPath); err != nil {
 		return fmt.Errorf("failed to generate %s: %w", indexFileName, err)
 	}
 
 	return nil
 }
 
-// 🔥 核心修复：递归扫描整个build目录 + 所有子目录，查找全部.so文件
+// 递归扫描整个build目录 + 所有子目录，查找全部.so文件
 func scanAllSOFilesRecursive() []string {
 	var soFiles []string
 
@@ -255,8 +254,8 @@ func generateJavaLibraryCode(soFiles []string) string {
 	return code
 }
 
-// 生成资源索引JSON
-func generateIndexJson(assetsDir, indexPath string) error {
+// 生成资源索引 TOML 文件（原始格式）
+func generateIndexToml(assetsDir, indexPath string) error {
 	var entries []IndexEntry
 	err := filepath.Walk(assetsDir, func(path string, f os.FileInfo, err error) error {
 		if err != nil {
@@ -287,8 +286,17 @@ func generateIndexJson(assetsDir, indexPath string) error {
 	if err != nil {
 		return err
 	}
-	jsonData, _ := json.MarshalIndent(entries, "", "  ")
-	return os.WriteFile(indexPath, jsonData, 0644)
+
+	// 写入标准TOML格式
+	var builder strings.Builder
+	for _, entry := range entries {
+		builder.WriteString("[[entry]]\n")
+		builder.WriteString(fmt.Sprintf("is_file = %t\n", entry.IsFile))
+		builder.WriteString(fmt.Sprintf("path = \"%s\"\n", entry.Path))
+		builder.WriteString(fmt.Sprintf("sha256 = \"%s\"\n\n", entry.SHA256))
+	}
+
+	return os.WriteFile(indexPath, []byte(builder.String()), 0644)
 }
 
 // ------------------------------
