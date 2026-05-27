@@ -548,20 +548,27 @@ var genCodeCmd = &cobra.Command{
 		var allIncludePaths []string
 		var allIndexedContentBlocks []meta.IndexedContentBlock
 		var allClasses []meta.ClassInfo
-
+		var files []string
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return err
 			}
-			if !strings.HasSuffix(path, ".h") && !strings.HasSuffix(path, ".cpp") {
-				return nil
+			if strings.HasSuffix(path, ".h") || strings.HasSuffix(path, ".cpp") {
+				files = append(files, path)
 			}
-
+			return nil
+		})
+		if err != nil {
+			fmt.Printf("walk dir failed: %v\n", err)
+			return
+		}
+		sort.Strings(files)
+		for _, path := range files {
 			var extraMeta meta.FileExtraMeta
 			fileContentBlocks, classList, err := processGenCodeFile(dir, path, &fieldMetas, &extraMeta)
 			if err != nil {
 				fmt.Printf("process file %s failed: %v\n", path, err)
-				return err
+				return
 			}
 
 			allClasses = append(allClasses, classList...)
@@ -573,8 +580,7 @@ var genCodeCmd = &cobra.Command{
 				allIncludePaths = append(allIncludePaths, p)
 			}
 			allIndexedContentBlocks = append(allIndexedContentBlocks, fileContentBlocks...)
-			return nil
-		})
+		}
 
 		if err != nil {
 			fmt.Printf("walk dir failed: %v\n", err)
