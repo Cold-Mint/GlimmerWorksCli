@@ -100,10 +100,16 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		return nil, nil, fmt.Errorf("read file failed: %v", err)
 	}
 
-	if len(lines) == 0 || lines[0] != "//@genCode" {
+	hasGenCodeAnnotation := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "//@genCode" {
+			hasGenCodeAnnotation = true
+			break
+		}
+	}
+	if !hasGenCodeAnnotation {
 		return nil, nil, nil
 	}
-
 	var inContentBlock bool
 	var currentContent string
 	var currentContentIndex int
