@@ -309,8 +309,12 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 	var headerContent strings.Builder
 	headerContent.WriteString("/*\n * Copyright (C) 2025  Cold-Mint <cold_mint@qq.com>\n *\n * This program is free software: you can redistribute it and/or modify\n * it under the terms of the GNU Affero General Public License as published\n * by the Free Software Foundation, either version 3 of the License, or\n * (at your option) any later version.\n *\n * This program is distributed in the hope that it will be useful,\n * but WITHOUT ANY WARRANTY; without even the implied warranty of\n * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n * GNU Affero General Public License for more details.\n *\n * You should have received a copy of the GNU Affero General Public License\n * along with this program.  If not, see <https://www.gnu.org/licenses/>.\n *\n * 版权(C) 2025  Cold-Mint <cold_mint@qq.com>\n *\n * 本程序是自由软件：你可以遵照自由软件基金会出版的GNU Affero通用公共许可证条款来重新分发和修改它\n * 该许可证的第3版，或者（由你选择）任何后续版本。\n *\n * 本程序的发布目的是希望它能有用，但没有任何担保；甚至没有适销性或特定用途适用性的默示担保。\n * 有关详细细节，请参阅GNU Affero通用公共许可证。\n *\n * 你应该已经收到一份GNU Affero通用公共许可证的副本。如果没有，请查阅<https://www.gnu.org/licenses/>。\n */\n#pragma once\n\n")
 
-	if len(includePaths) > 0 {
-		for _, incPath := range includePaths {
+	// 对 includePaths 进行排序，保证固定输出顺序
+	sortedIncludePaths := make([]string, len(includePaths))
+	copy(sortedIncludePaths, includePaths)
+	sort.Strings(sortedIncludePaths)
+	if len(sortedIncludePaths) > 0 {
+		for _, incPath := range sortedIncludePaths {
 			headerContent.WriteString(fmt.Sprintf("#include \"%s\"\n", incPath))
 		}
 		headerContent.WriteString("\n")
@@ -323,7 +327,13 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		}
 	}
 	if len(pathSet) > 0 {
+		// 对路径集合进行排序，保证固定输出顺序
+		sortedPaths := make([]string, 0, len(pathSet))
 		for path := range pathSet {
+			sortedPaths = append(sortedPaths, path)
+		}
+		sort.Strings(sortedPaths)
+		for _, path := range sortedPaths {
 			headerContent.WriteString(fmt.Sprintf("#include \"%s\"\n", path))
 		}
 		headerContent.WriteString("\n")
@@ -500,32 +510,50 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 		}
 	}
 
+	// 使用稳定排序的队列，确保相同入度的节点按原始顺序处理
 	var queue []string
 	for className, degree := range inDegree {
 		if degree == 0 {
 			queue = append(queue, className)
 		}
 	}
+	// 对初始队列进行排序，保证确定性顺序
+	sort.Strings(queue)
 
 	var sortedClasses []string
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 		sortedClasses = append(sortedClasses, current)
+		
+		// 收集所有邻居，排序后再处理，保证确定性顺序
+		var neighbors []string
 		for _, neighbor := range adj[current] {
 			inDegree[neighbor]--
 			if inDegree[neighbor] == 0 {
-				queue = append(queue, neighbor)
+				neighbors = append(neighbors, neighbor)
 			}
 		}
+		sort.Strings(neighbors)
+		queue = append(queue, neighbors...)
 	}
 
+	// 如果存在循环依赖，将未处理的节点按原始顺序添加
 	if len(sortedClasses) != len(depsMap) {
-		sortedClasses = make([]string, 0, len(depsMap))
-		for className := range depsMap {
-			sortedClasses = append(sortedClasses, className)
+		processed := make(map[string]bool)
+		for _, cls := range sortedClasses {
+			processed[cls] = true
 		}
-		sort.Strings(sortedClasses)
+		
+		// 按原始顺序收集未处理的节点
+		var remaining []string
+		for className := range depsMap {
+			if !processed[className] {
+				remaining = append(remaining, className)
+			}
+		}
+		sort.Strings(remaining)
+		sortedClasses = append(sortedClasses, remaining...)
 	}
 	return sortedClasses
 }
