@@ -117,7 +117,7 @@ Notes:
 				tag = version // 退而使用版本作为标签标注
 				commit = ""
 			}
-			annotation := fmt.Sprintf("# %s-%s", repo, tag)
+			annotation := fmt.Sprintf("#%s-%s", repo, tag)
 			builder.WriteString(annotation)
 			builder.WriteString("\n")
 
