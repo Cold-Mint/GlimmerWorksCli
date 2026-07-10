@@ -19,7 +19,8 @@ var sortCppFileCmd = &cobra.Command{
 	Use:   "sortCppFile",
 	Short: "Sort .cpp/.h/.c source file paths inside CMakeLists.txt",
 	Long: `This tool parses CMakeLists.txt, extracts all source file entries with suffix .cpp/.h/.c,
-sorts them lexicographically, and rewrites the file.
+sorts them with priority: .cpp first, then .c, finally .h, lexicographically inside same suffix,
+and rewrites the file.
 Paths containing variable symbol "$" will be wrapped with double quotes, normal paths without quotes.
 
 Usage Examples:
@@ -65,6 +66,21 @@ type FileEntry struct {
 	RawLine string // Formatted output line (with quotes processed)
 	Path    string // Raw path without quotes, used for sorting
 	HasVar  bool   // Mark whether path contains $ variable symbol
+	Suffix  string // file suffix: .cpp / .c / .h
+}
+
+// getSuffixPriority return weight for sort priority: cpp=0, c=1, h=2
+func getSuffixPriority(suffix string) int {
+	switch suffix {
+	case ".cpp":
+		return 0
+	case ".c":
+		return 1
+	case ".h":
+		return 2
+	default:
+		return 999
+	}
 }
 
 // sortCMakeSourceFiles core logic for parsing and sorting CMake source entries
@@ -106,7 +122,14 @@ func sortCMakeSourceFiles(filePath string) error {
 		if trimLine == "" || strings.HasSuffix(trimLine, ")") ||
 			(strings.HasSuffix(trimLine, ":") && !strings.Contains(trimLine, "FILES")) {
 			if len(collectingFiles) > 0 {
+				// Core fix: sort by suffix priority first, then path lex order
 				sort.Slice(collectingFiles, func(i, j int) bool {
+					priI := getSuffixPriority(collectingFiles[i].Suffix)
+					priJ := getSuffixPriority(collectingFiles[j].Suffix)
+					if priI != priJ {
+						return priI < priJ
+					}
+					// Same suffix, sort by path alphabet
 					return collectingFiles[i].Path < collectingFiles[j].Path
 				})
 				for _, entry := range collectingFiles {
@@ -126,34 +149,47 @@ func sortCMakeSourceFiles(filePath string) error {
 		}
 
 		lowerTrim := strings.ToLower(trimLine)
-		if strings.HasSuffix(lowerTrim, ".cpp") ||
-			strings.HasSuffix(lowerTrim, ".h") ||
-			strings.HasSuffix(lowerTrim, ".c") {
-
-			rawTrim := trimLine
-			hasVar := strings.Contains(rawTrim, "$")
-			path := strings.Trim(rawTrim, `" `)
-
-			var outputRaw string
-			if hasVar {
-				outputRaw = fmt.Sprintf(`"%s"`, path)
-			} else {
-				outputRaw = path
-			}
-
-			collectingFiles = append(collectingFiles, FileEntry{
-				RawLine: outputRaw,
-				Path:    path,
-				HasVar:  hasVar,
-			})
+		var suffix string
+		if strings.HasSuffix(lowerTrim, ".cpp") {
+			suffix = ".cpp"
+		} else if strings.HasSuffix(lowerTrim, ".c") {
+			suffix = ".c"
+		} else if strings.HasSuffix(lowerTrim, ".h") {
+			suffix = ".h"
+		} else {
+			// Not source file, skip
+			outputLines = append(outputLines, line)
 			continue
 		}
 
-		outputLines = append(outputLines, line)
+		rawTrim := trimLine
+		hasVar := strings.Contains(rawTrim, "$")
+		path := strings.Trim(rawTrim, `" `)
+
+		var outputRaw string
+		if hasVar {
+			outputRaw = fmt.Sprintf(`"%s"`, path)
+		} else {
+			outputRaw = path
+		}
+
+		collectingFiles = append(collectingFiles, FileEntry{
+			RawLine: outputRaw,
+			Path:    path,
+			HasVar:  hasVar,
+			Suffix:  suffix,
+		})
+		continue
 	}
 
+	// Handle remaining files at file end
 	if len(collectingFiles) > 0 {
 		sort.Slice(collectingFiles, func(i, j int) bool {
+			priI := getSuffixPriority(collectingFiles[i].Suffix)
+			priJ := getSuffixPriority(collectingFiles[j].Suffix)
+			if priI != priJ {
+				return priI < priJ
+			}
 			return collectingFiles[i].Path < collectingFiles[j].Path
 		})
 		for _, entry := range collectingFiles {
