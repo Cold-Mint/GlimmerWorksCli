@@ -45,6 +45,14 @@ func toSnakeCase(s string) string {
 	return strings.ToLower(result.String())
 }
 
+func isBuiltInType(fieldType string) bool {
+	switch fieldType {
+	case "bool", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "char", "unsigned char", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long", "float", "double", "size_t", "std::string":
+		return true
+	}
+	return false
+}
+
 func parseClassInfo(line string) (className, parentClassName string) {
 	if inheritMatches := inheritanceExtractRegex.FindStringSubmatch(line); inheritMatches != nil {
 		return inheritMatches[2], inheritMatches[3]
@@ -272,17 +280,12 @@ func processGenCodeFile(outPutFilePath string, filePath string, fieldMetas *[]me
 		}
 
 		fieldType := strings.TrimSpace(fieldMatches[1])
-		if !strings.Contains(fieldType, "::") {
-			switch fieldType {
-			case "bool", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "char", "unsigned char", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long", "float", "double", "size_t", "std::string":
-				break
-			default:
-				fieldType = currentNamespace + fieldType
-			}
+		if !strings.Contains(fieldType, "::") && !isBuiltInType(fieldType) {
+			fieldType = currentNamespace + fieldType
 		}
 		if strings.HasPrefix(fieldType, "std::vector<") {
 			innerType := strings.TrimSuffix(strings.TrimPrefix(fieldType, "std::vector<"), ">")
-			if !strings.Contains(innerType, "::") {
+			if !strings.Contains(innerType, "::") && !isBuiltInType(innerType) {
 				innerType = currentNamespace + innerType
 			}
 			fieldType = "std::vector<" + innerType + ">"
