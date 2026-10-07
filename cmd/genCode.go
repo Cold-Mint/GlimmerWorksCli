@@ -378,22 +378,22 @@ func generateCPPHeaderFile(outPutFilePath string, fieldMetas []meta.FieldMeta, i
 		}
 		bodyContent.WriteString("    template<>\n    struct from<" + className + "> {\n")
 		bodyContent.WriteString("        static " + className + " from_toml(const value &v) {\n")
-		bodyContent.WriteString("            " + className + " r;\n")
+		bodyContent.WriteString("            " + className + " resource;\n")
 
 		for _, fm := range allFields {
 			snakeName := toSnakeCase(fm.Name)
 			if fm.Default == "" {
-				bodyContent.WriteString(fmt.Sprintf("            r.%s = toml::find<%s>(v, \"%s\");\n", fm.Name, fm.Type, snakeName))
+				bodyContent.WriteString(fmt.Sprintf("            resource.%s = toml::find<%s>(v, \"%s\");\n", fm.Name, fm.Type, snakeName))
 			} else {
 				val := fm.Default
 				if fm.Type == "std::string" && !strings.HasPrefix(val, "\"") && !strings.HasSuffix(val, "\"") {
 					val = "\"" + val + "\""
 				}
-				bodyContent.WriteString(fmt.Sprintf("            r.%s = toml::find_or<%s>(v, \"%s\", %s);\n", fm.Name, fm.Type, snakeName, val))
+				bodyContent.WriteString(fmt.Sprintf("            resource.%s = toml::find_or<%s>(v, \"%s\", %s);\n", fm.Name, fm.Type, snakeName, val))
 			}
 		}
 
-		bodyContent.WriteString("            return r;\n        }\n    };\n\n")
+		bodyContent.WriteString("            return resource;\n        }\n    };\n\n")
 	}
 
 	bodyContent.WriteString("}\n")
@@ -528,7 +528,7 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 		current := queue[0]
 		queue = queue[1:]
 		sortedClasses = append(sortedClasses, current)
-		
+
 		// 收集所有邻居，排序后再处理，保证确定性顺序
 		var neighbors []string
 		for _, neighbor := range adj[current] {
@@ -547,7 +547,7 @@ func topologicalSort(depsMap map[string]meta.ClassDependency) []string {
 		for _, cls := range sortedClasses {
 			processed[cls] = true
 		}
-		
+
 		// 按原始顺序收集未处理的节点
 		var remaining []string
 		for className := range depsMap {
